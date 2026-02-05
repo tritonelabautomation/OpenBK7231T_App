@@ -2,6 +2,7 @@
 #include "../logging/logging.h"
 #include "drv_bl0937.h"
 #include "drv_bl0942.h"
+#include "drv_ht7017.h"
 #include "drv_bl_shared.h"
 #include "drv_neo6m.h"
 #include "drv_cse7766.h"
