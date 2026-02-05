@@ -250,7 +250,7 @@
 
 //#define	ENABLE_DRIVER_UART_TCP					1
 
-//#define	ENABLE_DRIVER_SSD1306					1
+#define	ENABLE_DRIVER_SSD1306					1
 
 // #define	ENABLE_DRIVER_PIR					1
 //#define ENABLE_DRIVER_BKPARTITIONS				1
