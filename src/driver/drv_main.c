@@ -521,12 +521,15 @@ static driver_t g_drivers[] = {
 #endif
 #if ENABLE_DRIVER_HT7017
     // drvdetail:{"name":"HT7017","title":"HT7017 Energy Meter","descr":"HT7017 UART 4800bps power meter","requires":""}
-    { 
-        "HT7017", 
-        HT7017_Init,                          // ← Your Init function
-        HT7017_RunEverySecond,                // ← Your main loop
-        BL09XX_AppendInformationToHTTPIndexPage,  // Reuse BL0942 web UI
-        NULL, NULL, NULL, NULL, false 
+    {"HT7017", 
+    HT7017_Init,                          // ← Your Init function
+    HT7017_RunEverySecond,                // ← Your main loop
+    BL09XX_AppendInformationToHTTPIndexPage,  // Reuse BL0942 web UI
+    NULL, 
+	NULL, 
+	NULL, 
+	NULL, 
+	false, 
     },
 #endif
 #if ENABLE_DRIVER_PWM_GROUP
