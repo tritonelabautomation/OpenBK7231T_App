@@ -6,5 +6,6 @@
 // Only expose the public functions
 void HT7017_Init(void);
 void HT7017_RunEverySecond(void);
+void HT7017_AppendInformationToHTTPIndexPage(http_request_t* request);
 
 #endif
