@@ -1,8 +1,30 @@
-#include "new_common.h"
-#include "HT7017.h"
+#include "drv_ht7017.h"
+#include "../obk_config.h"
+
+
+
+#if ENABLE_DRIVER_HT7017 
+
+#include <math.h>
+#include <stdint.h>
+
+#include "../logging/logging.h"
+#include "../new_cfg.h"
+#include "../new_pins.h"
+#include "../cmnds/cmd_public.h"
+#include "drv_bl_shared.h"
+#include "drv_pwrCal.h"
+#include "drv_spi.h"
 #include "drv_uart.h"
 #include <stdio.h>
 #include <string.h>
+
+
+static unsigned short ht7017_baudRate = 4800;
+
+
+
+
 
 // --------------------------------------------------------------------------------
 // Configuration & Globals
