@@ -1,4 +1,4 @@
-#include "ht7017.h"
+#include "drv_ht7017.h"
 #include "../obk_config.h"
 
 // Only compile if enabled in obk_config.h or via compiler flag
