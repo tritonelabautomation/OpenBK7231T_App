@@ -1,7 +1,7 @@
 #pragma once
 
- //#ifndef __DRV_HT7017_H__
-// #define __DRV_HT7017_H__
+#ifndef __DRV_HT7017_H__
+#define __DRV_HT7017_H__
 
 // // Only expose the public functions
 // void HT7017_Init(void);
@@ -9,9 +9,6 @@
 // void HT7017_AppendInformationToHTTPIndexPage(http_request_t* request);
 
 // #endif
-
-#ifndef __HT7017_H__
-#define __HT7017_H__
 
 #include "../new_common.h"
 #include "../httpserver/new_http.h" // Fixes unknown type http_request_t
