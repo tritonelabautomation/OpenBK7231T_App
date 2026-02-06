@@ -525,7 +525,7 @@ static driver_t g_drivers[] = {
     {"HT7017", 
     HT7017_Init,                          // ← Your Init function
     HT7017_RunEverySecond,                // ← Your main loop
-    BL09XX_AppendInformationToHTTPIndexPage,  // Reuse BL0942 web UI
+    HT7017_AppendInformationToHTTPIndexPage,  // Reuse BL0942 web UI
     NULL, 
 	NULL, 
 	NULL, 
