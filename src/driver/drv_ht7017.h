@@ -1,7 +1,7 @@
 #pragma once
 
- #ifndef __DRV_HT7017_H__
- #define __DRV_HT7017_H__
+ //#ifndef __DRV_HT7017_H__
+// #define __DRV_HT7017_H__
 
 // // Only expose the public functions
 // void HT7017_Init(void);
@@ -10,30 +10,21 @@
 
 // #endif
 
-// HT7017 Register Addresses (Source: Datasheet Page 16-18) [2-4]
-#define HT7017_REG_I1RMS        0x06 // Current Channel 1 RMS
-#define HT7017_REG_I2RMS        0x07 // Current Channel 2 RMS
-#define HT7017_REG_URMS         0x08 // Voltage RMS
-#define HT7017_REG_POWER_P1     0x0A // Active Power Channel 1
-#define HT7017_REG_POWER_Q1     0x0B // Reactive Power Channel 1
-#define HT7017_REG_EMUSR        0x19 // EMU Status Register
-#define HT7017_REG_WREN         0x33 // Write Enable
+#ifndef __HT7017_H__
+#define __HT7017_H__
 
-// Packet Constants
-#define HT7017_FRAME_HEAD       0x6A
-#define HT7017_BAUD_RATE        4800
+#include "../new_common.h"
+// Fix 1: Include HTTP definition for http_request_t
+#include "../httpserver/new_http.h" 
 
-// Main Driver Functions
+// Register Definitions [15-17]
+#define HT7017_REG_RMS_I1       0x06 
+#define HT7017_REG_RMS_U        0x08 
+#define HT7017_REG_POWER_P1     0x0A 
+
 void HT7017_Init(void);
-void HT7017_RunEverySecond(void); 
-
-// Web UI Integration (Uncommented for Main Page Display)
-// This allows the driver to write HTML directly to the main page [1]
+void HT7017_RunEverySecond(void);
+void HT7017_RunQuick(void);
 void HT7017_AppendInformationToHTTPIndexPage(http_request_t* request);
-
-// Getters for integration with OpenBeken logic
-float HT7017_GetVoltage(void);
-float HT7017_GetCurrent(void);
-float HT7017_GetPower(void);
 
 #endif // __HT7017_H__
