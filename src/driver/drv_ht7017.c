@@ -29,12 +29,6 @@
 #define HT7017_READ_CMD_MASK    0x7F
 #define HT7017_REG_FREQ         0x09 
 
-// --- CRITICAL HACK FOR BK7231N ---
-// 0 = UART1 (P10/P11) -> Your Sensor
-// 1 = UART2 (P0/P1)   -> Default/Logs
-extern int g_uart_port; 
-// ---------------------------------
-
 static float g_volts = 0.0f;
 static float g_amps = 0.0f;
 static float g_power = 0.0f;
@@ -116,13 +110,9 @@ static void HT7017_ProcessPacket(uint8_t *rx_data) {
 }
 
 void HT7017_Init(void) {
-    // --- FORCE PORT TO UART1 (P10/P11) ---
-    // This is the specific fix for your "command not found" error
-    g_uart_port = 0; 
-    // -------------------------------------
-
+    // Standard Init - relies on autoexec.bat for port mapping
     UART_InitUART(HT7017_BAUD_RATE, UART_PARITY_EVEN, UART_STOP_1_BIT);
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Init on UART1 (P10/P11)");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Initialized");
 }
 
 void HT7017_RunEverySecond(void) {
