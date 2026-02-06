@@ -1,10 +1,9 @@
-#include "drv_ht7017.h"
 #include "../obk_config.h"
 
-// Only compile if enabled in obk_config.h or via compiler flag
-// You can remove this check if you are manually adding the file to the build list
-// #if ENABLE_DRIVER_HT7017 
+// Check if driver is enabled in config
+#if ENABLE_DRIVER_HT7017
 
+#include "drv_ht7017.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,23 +13,30 @@
 #include "../logging/logging.h"
 #include "../new_cfg.h"
 #include "../new_pins.h"
-#include "drv_uart.h" // Fixes implicit UART_SendData
+#include "drv_uart.h"
 
-// Define Logging Feature if not present in your SDK version
 #ifndef LOG_FEATURE_ENERGY
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
 #endif
 
+// Fix for missing UART Constants in some SDK versions
+#ifndef UART_PARITY_EVEN
+#define UART_PARITY_EVEN 2
+#endif
+#ifndef UART_STOP_1_BIT
+#define UART_STOP_1_BIT 0
+#endif
+
 // Packet Constants
-#define HT7017_READ_CMD_MASK    0x7F 
+#define HT7017_READ_CMD_MASK    0x7F
 
 // Globals for measurements
 static float g_volts = 0.0f;
 static float g_amps = 0.0f;
 static float g_power = 0.0f;
 
-// Calibration Scalars (Calibrate these based on your hardware)
-static float g_dco_V = 0.00012f; 
+// Calibration Scalars
+static float g_dco_V = 0.00012f;
 static float g_dco_I = 0.000015f;
 static float g_dco_P = 0.005f;
 
@@ -43,63 +49,55 @@ static uint8_t g_last_cmd = 0;
 // -----------------------------------------------------------------------------
 
 static void HT7017_SendRequest(uint8_t reg_addr) {
-    // FIX 1: Use an array, not a single byte variable
-    uint8_t send_buf[4]; 
-    
-    send_buf = HT7017_FRAME_HEAD;      // 0x6A
-    send_buf[5] = reg_addr & HT7017_READ_CMD_MASK; // Read Bit (7) is 0
+    uint8_t send_buf[2];
 
-    // Clear buffer to remove old garbage data
+    // FIX: Assign to the ARRAY INDEX, not the array variable
+    send_buf[0] = HT7017_FRAME_HEAD;
+    send_buf[1] = reg_addr & HT7017_READ_CMD_MASK;
+
+    // Clear buffer
     UART_ConsumeBytes(UART_GetDataSize());
 
-    // Send the 2 bytes
-    UART_SendData(send_buf, 2);
-    
-    // Store command for checksum verification later
-    g_last_cmd = send_buf[5]; 
+    // FIX: Use a loop with UART_SendByte (Compatible with all SDKs)
+    for(int i = 0; i < 2; i++) {
+        UART_SendByte(send_buf[i]);
+    }
+
+    g_last_cmd = send_buf[1];
 }
 
 static void HT7017_ProcessPacket(uint8_t *rx_data) {
-    // HT7017 Read Response Structure (Datasheet Page 14) [8]:
-    // Index 0: DATA2 (High Byte)
-    // Index 1: DATA1 (Mid Byte)
-    // Index 2: DATA0 (Low Byte)
-    // Index 3: CHKSUM
-    
-    // 1. Verify Checksum
-    // Algo: ~(HEAD + CMD + DATA2 + DATA1 + DATA0) = CHKSUM
+    // FIX: Use array indexing [0] to get the value, not the pointer address
     uint8_t calculated_sum = HT7017_FRAME_HEAD;
     calculated_sum += g_last_cmd;
-    calculated_sum += rx_data; // FIX 2: Access array index
-    calculated_sum += rx_data[5]; 
-    calculated_sum += rx_data[4]; 
-    
-    // Bitwise Inversion
+    calculated_sum += rx_data[0];
+    calculated_sum += rx_data[1];
+    calculated_sum += rx_data[2];
+
     calculated_sum = ~calculated_sum;
 
-    if (calculated_sum != rx_data[7]) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Checksum Fail: Exp %02X Got %02X", calculated_sum, rx_data[7]);
+    if (calculated_sum != rx_data[3]) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Checksum Fail: Exp %02X Got %02X", calculated_sum, rx_data[3]);
         return;
     }
 
-    // 2. Extract 24-bit Value (Big Endian)
-    // FIX 2: Shift the data value, not the pointer address
-    uint32_t raw_val = (rx_data << 16) | (rx_data[5] << 8) | rx_data[4];
+    // FIX: Bit shift the VALUE at index 0, not the pointer
+    uint32_t raw_val = (rx_data[0] << 16) | (rx_data[1] << 8) | rx_data[2];
 
-    // 3. Apply Scaling
+    // Apply Scaling
     switch(g_last_cmd) {
-        case HT7017_REG_RMS_U: // 0x08 Voltage
+        case HT7017_REG_RMS_U: // Voltage
             g_volts = raw_val * g_dco_V;
             break;
 
-        case HT7017_REG_RMS_I1: // 0x06 Current
+        case HT7017_REG_RMS_I1: // Current
             g_amps = raw_val * g_dco_I;
             break;
 
-        case HT7017_REG_POWER_P1: // 0x0A Active Power
-            // Power is signed 24-bit (Bit 23 is sign)
+        case HT7017_REG_POWER_P1: // Power
+            // Sign extension for 24-bit integer
             if (raw_val & 0x800000) {
-                raw_val |= 0xFF000000; // Sign extend to 32-bit
+                raw_val |= 0xFF000000;
                 g_power = (int32_t)raw_val * g_dco_P;
             } else {
                 g_power = raw_val * g_dco_P;
@@ -113,15 +111,13 @@ static void HT7017_ProcessPacket(uint8_t *rx_data) {
 // -----------------------------------------------------------------------------
 
 void HT7017_Init(void) {
-    // UART Init: 4800 bps, Even Parity, 1 Stop Bit
-    // Source: Datasheet 4.1.1 [9]
+    // FIX: Use the defined constants for 8E1 (Even Parity)
     UART_InitUART(HT7017_BAUD_RATE, UART_PARITY_EVEN, UART_STOP_1_BIT);
-    
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Initialized: 4800,8,E,1");
 }
 
 void HT7017_RunEverySecond(void) {
-    // Polling State Machine (Voltage -> Current -> Power)
+    // Polling State Machine
     switch (g_scan_index) {
         case 0: HT7017_SendRequest(HT7017_REG_RMS_U); break;
         case 1: HT7017_SendRequest(HT7017_REG_RMS_I1); break;
@@ -132,18 +128,23 @@ void HT7017_RunEverySecond(void) {
 }
 
 void HT7017_RunQuick(void) {
-    // Check if we have received the 4-byte response
-    // Response: DATA2, DATA1, DATA0, CHKSUM
+    // Read 4 bytes: DATA2, DATA1, DATA0, CHKSUM
     if (UART_GetDataSize() >= 4) {
-        uint8_t buff[10]; // Local buffer
-        UART_GetRawData(buff, 4);
+        uint8_t buff[4];
+        // FIX: Manual loop to get bytes
+        for(int i = 0; i < 4; i++) {
+            buff[i] = UART_GetByte(i);
+        }
         HT7017_ProcessPacket(buff);
+        
+        // Consume the bytes we just read
+        UART_ConsumeBytes(4);
     }
 }
 
 void HT7017_AppendInformationToHTTPIndexPage(http_request_t* request) {
-    // FIX 4: Use a large buffer, not a single char
-    char tmp; 
+    // FIX: Ensure buffer is large enough for sprintf
+    char tmp[128];
     
     sprintf(tmp, "<h5>HT7017 Energy</h5>");
     strcat(request->reply, tmp);
@@ -158,9 +159,9 @@ void HT7017_AppendInformationToHTTPIndexPage(http_request_t* request) {
     strcat(request->reply, tmp);
 }
 
-// Getters for integration with other OBK modules (MQTT, etc.)
+// Getters
 float HT7017_GetVoltage(void) { return g_volts; }
 float HT7017_GetCurrent(void) { return g_amps; }
 float HT7017_GetPower(void)   { return g_power; }
 
-// #endif // ENABLE_DRIVER_HT7017
+#endif // ENABLE_DRIVER_HT7017
