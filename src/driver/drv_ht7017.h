@@ -1,7 +1,7 @@
 #pragma once
 
-// #ifndef __DRV_HT7017_H__
-// #define __DRV_HT7017_H__
+ #ifndef __DRV_HT7017_H__
+ #define __DRV_HT7017_H__
 
 // // Only expose the public functions
 // void HT7017_Init(void);
@@ -9,11 +9,6 @@
 // void HT7017_AppendInformationToHTTPIndexPage(http_request_t* request);
 
 // #endif
-
-#ifndef __HT7017_H__
-#define __HT7017_H__
-
-#include "new_common.h"
 
 // HT7017 Register Addresses (Source: Datasheet Page 16-18) [2-4]
 #define HT7017_REG_I1RMS        0x06 // Current Channel 1 RMS
