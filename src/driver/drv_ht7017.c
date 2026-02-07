@@ -1,7 +1,5 @@
 /*
- * HT7017 Energy Meter Driver (Clean Version)
- * Protocol: 4800 baud, 8 data, Even parity, 1 stop
- * Frame: 6-Byte Read Request (Robust) -> 4-Byte Response
+ * HT7017 Driver - Datasheet Compliant (2-Byte Read)
  */
 
 #include "../obk_config.h"
@@ -23,26 +21,25 @@
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
 #endif
 
-// Registers
-#define HT7017_REG_RMS_U        0x03
-#define HT7017_REG_RMS_I1       0x04
-#define HT7017_REG_RMS_I2       0x07
-#define HT7017_REG_FREQ         0x09
-#define HT7017_REG_POWER_P1     0x05
-#define HT7017_READ_CMD_MASK    0x7F
+// --- Registers per Datasheet Page 13 ---
+#define HT7017_REG_RMS_I1       0x06  // Current
+#define HT7017_REG_RMS_U        0x08  // Voltage
+#define HT7017_REG_FREQ         0x09  // Frequency
+#define HT7017_REG_POWER_P1     0x0A  // Power
+#define HT7017_HEAD             0x6A
 
-// State variables
+// State
 static float g_volts = 0.0f;
 static float g_amps = 0.0f;
 static float g_power = 0.0f;
 static float g_freq = 0.0f;
 
 // Calibration Defaults
-static float g_voltage_cal = 0.00012f;
-static float g_current_cal = 0.000015f;
-static float g_power_cal = 0.005f;
+static float g_dco_V = 0.00012f;
+static float g_dco_I = 0.000015f;
+static float g_dco_P = 0.005f;
 
-// Diagnostics (Renamed to match usage)
+// Debug Stats
 static uint32_t g_tx_count = 0;
 static uint32_t g_rx_count = 0;
 static uint32_t g_pkt_count = 0;
@@ -52,122 +49,102 @@ static int g_scan_index = 0;
 static uint8_t g_last_reg = 0;
 
 /*
- * Send 6-Byte Read Request
- * [Head] [Reg] [00] [00] [Head] [Chk]
+ * Send Read Request (2 Bytes ONLY)
+ * Format: [0x6A] [RegAddr]
  */
 static void HT7017_SendReadRequest(uint8_t reg_addr) {
-    uint8_t send_buf[6];
-    uint8_t chksum = 0;
-
-    // Clear buffer to remove noise
+    // Clear buffer to ensure we read fresh data
     UART_ConsumeBytes(UART_GetDataSize());
 
-    // Build Frame
-    send_buf[0] = 0x6A;
-    send_buf[1] = reg_addr & HT7017_READ_CMD_MASK;
-    send_buf[2] = 0x00;
-    send_buf[3] = 0x00;
-    send_buf[4] = 0x6A;
-    
-    // Calculate Checksum (Sum 0-4)
-    for(int i=0; i<5; i++) {
-        chksum += send_buf[i];
-    }
-    send_buf[5] = ~chksum; // Invert
+    // Send 2 Bytes Only
+    UART_SendByte(HT7017_HEAD);
+    UART_SendByte(reg_addr);
 
-    // Log TX
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, 
-              "TX > Reg:0x%02X | Bytes: %02X %02X %02X %02X %02X %02X", 
-              reg_addr, send_buf[0], send_buf[1], send_buf[2], send_buf[3], send_buf[4], send_buf[5]);
-
-    // Send
-    for(int i = 0; i < 6; i++) {
-        UART_SendByte(send_buf[i]);
-        g_tx_count++;
-    }
-    
     g_last_reg = reg_addr;
+    g_tx_count += 2;
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "TX > Head:%02X Reg:%02X", HT7017_HEAD, reg_addr);
 }
 
 /*
- * Process 4-Byte Response
- * [D2] [D1] [D0] [Chk]
+ * Process Response (4 Bytes)
+ * Format: [DataH] [DataM] [DataL] [Checksum]
  */
 static void HT7017_ProcessResponse(uint8_t *rx_data) {
     g_rx_count += 4;
-    
-    // Log Raw RX
+    g_pkt_count++;
+
+    // 1. Calculate Checksum: ~(DataH + DataM + DataL)
+    uint8_t sum = rx_data[0] + rx_data[1] + rx_data[2];
+    uint8_t calc_chk = ~sum;
+
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, 
-              "RX < Raw: %02X %02X %02X %02X", 
-              rx_data[0], rx_data[1], rx_data[2], rx_data[3]);
+        "RX < %02X %02X %02X | Chk:%02X (Calc:%02X)", 
+        rx_data[0], rx_data[1], rx_data[2], rx_data[3], calc_chk);
 
-    // Verify Checksum: ~(0x6A + Reg + D2 + D1 + D0)
-    uint8_t calc_sum = 0x6A + g_last_reg + rx_data[0] + rx_data[1] + rx_data[2];
-    calc_sum = ~calc_sum;
-
-    if(calc_sum != rx_data[3]) {
+    if (calc_chk != rx_data[3]) {
         g_chk_err++;
-        addLogAdv(LOG_ERROR, LOG_FEATURE_ENERGY, "Checksum Error! Exp:0x%02X Got:0x%02X", calc_sum, rx_data[3]);
-        // We continue anyway for debugging purposes
-    } else {
-        g_pkt_count++;
+        addLogAdv(LOG_ERROR, LOG_FEATURE_ENERGY, "Checksum Error!");
     }
 
-    // Combine 24-bit value
+    // 2. Parse 24-bit Value
     uint32_t raw_val = (rx_data[0] << 16) | (rx_data[1] << 8) | rx_data[2];
 
     switch(g_last_reg) {
         case HT7017_REG_RMS_U:
-            g_volts = raw_val * g_voltage_cal;
-            CHANNEL_Set(10, (int)(g_volts * 10), 0); // Ch10: 2305 = 230.5V
+            g_volts = raw_val * g_dco_V;
+            CHANNEL_Set(10, (int)(g_volts * 10), 0);
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "Voltage: %.2fV", g_volts);
             break;
+
         case HT7017_REG_RMS_I1:
-            g_amps = raw_val * g_current_cal;
-            CHANNEL_Set(11, (int)(g_amps * 1000), 0); // Ch11: 1500 = 1.500A
+            g_amps = raw_val * g_dco_I;
+            CHANNEL_Set(11, (int)(g_amps * 1000), 0);
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "Current: %.3fA", g_amps);
             break;
+
         case HT7017_REG_POWER_P1:
-            if(raw_val & 0x800000) { // Signed 24-bit
-                 raw_val |= 0xFF000000;
-                 g_power = (int32_t)raw_val * g_power_cal;
+            if (raw_val & 0x800000) {
+                raw_val |= 0xFF000000;
+                g_power = (int32_t)raw_val * g_dco_P;
             } else {
-                 g_power = raw_val * g_power_cal;
+                g_power = raw_val * g_dco_P;
             }
-            CHANNEL_Set(12, (int)(g_power * 10), 0); // Ch12: 500 = 50.0W
+            CHANNEL_Set(12, (int)(g_power * 10), 0);
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "Power: %.2fW", g_power);
             break;
+
         case HT7017_REG_FREQ:
-            if(raw_val > 0) {
-                g_freq = 1000000.0f / raw_val;
-                CHANNEL_Set(13, (int)(g_freq * 10), 0); // Ch13: 500 = 50.0Hz
-            }
-            break;
+             if(raw_val > 0) {
+                 g_freq = 1000000.0f / raw_val;
+                 CHANNEL_Set(13, (int)(g_freq * 10), 0);
+             }
+             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "Freq: %.2fHz", g_freq);
+             break;
     }
 }
 
 void HT7017_Init(void) {
-    // Init UART: 4800, 8, Even, 1
-    // Note: We rely on autoexec.bat to set the correct Port (0 vs 1)
-    UART_InitUART(4800, 2, 0);
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Initialized (4800,8,E,1)");
+    UART_InitUART(4800, 2, 0); 
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Init: 2-Byte Protocol");
 }
 
 void HT7017_RunEverySecond(void) {
-    // Debug output every few seconds if no packets
-    if(g_pkt_count == 0 && g_tx_count > 0 && (g_scan_index == 0)) {
-        addLogAdv(LOG_WARN, LOG_FEATURE_ENERGY, "Stats: TX=%u RX=%u (No valid packets yet)", g_tx_count, g_rx_count);
+    if(g_tx_count > 0 && g_rx_count == 0) {
+        addLogAdv(LOG_WARN, LOG_FEATURE_ENERGY, "Stats: TX=%u RX=0 (Check Pins/Baud)", g_tx_count);
     }
 
-    switch(g_scan_index) {
+    switch (g_scan_index) {
         case 0: HT7017_SendReadRequest(HT7017_REG_RMS_U); break;
         case 1: HT7017_SendReadRequest(HT7017_REG_RMS_I1); break;
         case 2: HT7017_SendReadRequest(HT7017_REG_POWER_P1); break;
         case 3: HT7017_SendReadRequest(HT7017_REG_FREQ); break;
     }
     g_scan_index++;
-    if(g_scan_index > 3) g_scan_index = 0;
+    if (g_scan_index > 3) g_scan_index = 0;
 }
 
 void HT7017_RunQuick(void) {
-    // We need at least 4 bytes for a response
     if (UART_GetDataSize() >= 4) {
         uint8_t buff[4];
         for(int i = 0; i < 4; i++) {
@@ -180,15 +157,14 @@ void HT7017_RunQuick(void) {
 
 void HT7017_AppendInformationToHTTPIndexPage(http_request_t* request) {
     char tmp[128];
-    sprintf(tmp, "<h5>HT7017 Stats</h5>");
-    strcat(request->reply, tmp);
-    sprintf(tmp, "TX: %u | RX: %u | Pkts: %u<br>", g_tx_count, g_rx_count, g_pkt_count); // FIXED VARIABLE NAMES
+    sprintf(tmp, "<h5>HT7017</h5>");
     strcat(request->reply, tmp);
     sprintf(tmp, "V: %.2fV, I: %.3fA, P: %.2fW, F: %.1fHz<br>", g_volts, g_amps, g_power, g_freq);
     strcat(request->reply, tmp);
+    sprintf(tmp, "Debug: TX=%u RX=%u Err=%u<br>", g_tx_count, g_rx_count, g_chk_err);
+    strcat(request->reply, tmp);
 }
 
-// Getters
 float HT7017_GetVoltage(void) { return g_volts; }
 float HT7017_GetCurrent(void) { return g_amps; }
 float HT7017_GetPower(void)   { return g_power; }
