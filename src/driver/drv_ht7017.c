@@ -148,7 +148,14 @@ void HT7017_Init(void) {
     UART_InitUART(4800, 2, 0); 
 
     CMD_RegisterCommand("HT7017_Baud", CMD_HT7017_Baud, NULL);
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Init: 4800,8,E,1 (Buffer Allocated)");
+    // --- NEW DIAGNOSTIC CODE ---
+    int actualIndex = UART_GetSelectedPortIndex();
+    if (actualIndex == 0) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HARDWARE VERIFIED: Using UART1 (Pin 15/16 - P10/P11)");
+    } else {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HARDWARE VERIFIED: Using UART2 (Pin 6/7 - P0/P1)");
+    }
+    // ---------------------------
 }
 
 void HT7017_RunEverySecond(void) {
