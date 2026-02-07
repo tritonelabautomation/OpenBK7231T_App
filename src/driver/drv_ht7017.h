@@ -17,6 +17,7 @@
 #define HT7017_REG_RMS_I1       0x06 // Current Channel 1 RMS
 #define HT7017_REG_RMS_U        0x08 // Voltage RMS
 #define HT7017_REG_POWER_P1     0x0A // Active Power Channel 1
+#define HT7017_REG_FREQ         0x09 // Frequency (Added)
 
 // Packet Constants
 #define HT7017_FRAME_HEAD       0x6A
