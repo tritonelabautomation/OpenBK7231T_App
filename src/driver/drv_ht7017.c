@@ -139,23 +139,23 @@ static void HT7017_ProcessResponse(uint8_t *rx_data) {
 }
 
 void HT7017_Init(void) {
-    // 1. CRITICAL: Allocate the Receive Buffer
-    // Without this, the system drops data and throws "UART 0 not initialized"
+    // 1. Setup Buffer
     UART_InitReceiveRingBuffer(512);
 
-    // 2. Initialize Hardware 
-    // 4800 baud, 2 = Even Parity, 0 = No Flow Control
+    // 2. Setup Hardware
     UART_InitUART(4800, 2, 0); 
-
     CMD_RegisterCommand("HT7017_Baud", CMD_HT7017_Baud, NULL);
-    // --- NEW DIAGNOSTIC CODE ---
-    int actualIndex = UART_GetSelectedPortIndex();
-    if (actualIndex == 0) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HARDWARE VERIFIED: Using UART1 (Pin 15/16 - P10/P11)");
+
+    // --- NEW DIAGNOSTIC CODE (Fixed) ---
+    // Flag 26 controls the port. We check it directly.
+    if (CFG_HasFlag(26)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HARDWARE VERIFIED: Flag 26 ON -> Using UART2 (Pin 6/7 - P0/P1)");
     } else {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HARDWARE VERIFIED: Using UART2 (Pin 6/7 - P0/P1)");
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HARDWARE VERIFIED: Flag 26 OFF -> Using UART1 (Pin 15/16 - P10/P11)");
     }
-    // ---------------------------
+    // -----------------------------------
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Init: 4800,8,E,1 (Buffer Allocated)");
 }
 
 void HT7017_RunEverySecond(void) {
