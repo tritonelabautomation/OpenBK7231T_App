@@ -18,6 +18,7 @@
 #include "../new_cfg.h"
 #include "../new_pins.h"
 #include "drv_uart.h"
+#include "../cmnds/cmd_public.h" // Required for CMD_RegisterCommand
 
 #ifndef LOG_FEATURE_ENERGY
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
@@ -49,6 +50,15 @@ static uint32_t g_chk_err = 0;
 
 static int g_scan_index = 0;
 static uint8_t g_last_reg = 0;
+
+// Command for baud rate changing
+static commandResult_t CMD_HT7017_Baud(const void *context, const char *cmd, const char *args, int cmdFlags) {
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    int baud = atoi(args);
+    UART_InitUART(baud, 2, 0); 
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017: Set Baud to %d", baud);
+    return CMD_RES_OK;
+}
 
 /*
  * Send Read Request
@@ -89,7 +99,6 @@ static void HT7017_ProcessResponse(uint8_t *rx_data) {
     if (calc_chk != rx_data[3]) {
         g_chk_err++;
         addLogAdv(LOG_ERROR, LOG_FEATURE_ENERGY, "Checksum Error!");
-        // We continue processing for debug visibility
     }
 
     // 2. Combine 24-bit Data (Big Endian)
@@ -109,7 +118,6 @@ static void HT7017_ProcessResponse(uint8_t *rx_data) {
             break;
 
         case HT7017_REG_POWER_P1: // 0x0A
-            // Power is Signed 24-bit
             if (raw_val & 0x800000) {
                 raw_val |= 0xFF000000;
                 g_power = (int32_t)raw_val * g_dco_P;
@@ -122,8 +130,6 @@ static void HT7017_ProcessResponse(uint8_t *rx_data) {
 
         case HT7017_REG_FREQ: // 0x09
              if(raw_val > 0) {
-                 // HT7017 usually returns Period. Freq = Clock / Period.
-                 // Assuming 1MHz clock for now based on typical implementation.
                  g_freq = 1000000.0f / raw_val;
                  CHANNEL_Set(13, (int)(g_freq * 10), 0);
              }
@@ -133,13 +139,19 @@ static void HT7017_ProcessResponse(uint8_t *rx_data) {
 }
 
 void HT7017_Init(void) {
-    // 4800 baud, 8 bits, Even Parity, 1 Stop bit
+    // 1. CRITICAL: Allocate the Receive Buffer
+    // Without this, the system drops data and throws "UART 0 not initialized"
+    UART_InitReceiveRingBuffer(512);
+
+    // 2. Initialize Hardware 
+    // 4800 baud, 2 = Even Parity, 0 = No Flow Control
     UART_InitUART(4800, 2, 0); 
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Init: 4800,8,E,1 (2-Byte Protocol)");
+
+    CMD_RegisterCommand("HT7017_Baud", CMD_HT7017_Baud, NULL);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017 Init: 4800,8,E,1 (Buffer Allocated)");
 }
 
 void HT7017_RunEverySecond(void) {
-    // Debug warning if bus is dead
     if(g_tx_count > 0 && g_rx_count == 0 && (g_scan_index == 0)) {
         addLogAdv(LOG_WARN, LOG_FEATURE_ENERGY, "Stats: TX=%u RX=0 (Check Pins & Autoexec)", g_tx_count);
     }
@@ -155,7 +167,6 @@ void HT7017_RunEverySecond(void) {
 }
 
 void HT7017_RunQuick(void) {
-    // Datasheet says response is 4 bytes
     if (UART_GetDataSize() >= 4) {
         uint8_t buff[4];
         for(int i = 0; i < 4; i++) {
