@@ -63,37 +63,39 @@ void HT7017_Init(void) {
 }
 
 void HT7017_RunEverySecond(void) {
-    // Send Read Voltage Command (0x6A 0x08)
-    UART_ConsumeBytes(UART_GetDataSize()); // Clear buffer before sending
+    // Step 1: Read and discard any stale bytes from previous cycle
+    // (do this only if we weren't expecting a valid reply)
     
+    // Step 2: Send the read command
     UART_SendByte(0x6A);
-    UART_SendByte(0x08);
+    UART_SendByte(0x08);  // Read RMS_U (voltage)
     g_tx_count += 2;
-
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "TX > 6A 08 (Total Sent: %u)", g_tx_count);
+    
+    // Step 3: DO NOT flush here - let RunQuick collect the 4-byte response
 }
 
-// This function runs constantly to catch ANY incoming data
 void HT7017_RunQuick(void) {
     int available = UART_GetDataSize();
     
-    if (available > 0) {
-        g_rx_total += available;
+    if (available >= 4) {  // Wait for a FULL response frame
+        uint8_t d2 = UART_GetByte(0);
+        uint8_t d1 = UART_GetByte(1);
+        uint8_t d0 = UART_GetByte(2);
+        uint8_t cs = UART_GetByte(3);
         
-        // Print the header for this batch
-        char hexDump[128] = {0};
-        char *p = hexDump;
-        
-        for (int i = 0; i < available && i < 20; i++) { // Limit to 20 bytes per log line
-            byte b = UART_GetByte(i);
-            sprintf(p, "%02X ", b);
-            p += 3;
+        // Validate checksum
+        uint8_t expected = ~(0x6A + 0x08 + d2 + d1 + d0) & 0xFF;
+        if (cs == expected) {
+            uint32_t raw = ((uint32_t)d2 << 16) | ((uint32_t)d1 << 8) | d0;
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "RX OK: %02X %02X %02X CS=%02X raw=%u", d2, d1, d0, cs, raw);
+            // Store raw for GetVoltage() to scale
+        } else {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "RX CHECKSUM FAIL: got %02X expected %02X", cs, expected);
         }
-        
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "RX RECEIVED! Data: %s", hexDump);
-        
-        // Consume the bytes so we can read new ones
-        UART_ConsumeBytes(available);
+        UART_ConsumeBytes(4);  // ← Consume AFTER reading
     }
 }
 
