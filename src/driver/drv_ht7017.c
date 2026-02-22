@@ -63,16 +63,24 @@ void HT7017_Init(void) {
 }
 
 void HT7017_RunEverySecond(void) {
-    // Step 1: Read and discard any stale bytes from previous cycle
-    // (do this only if we weren't expecting a valid reply)
+    int stale = UART_GetDataSize();
+    if (stale > 0) {
+        // LOG BEFORE FLUSHING - this proves data arrived but was discarded
+        char dump[64] = {0};
+        char *p = dump;
+        for (int i = 0; i < stale && i < 10; i++) {
+            sprintf(p, "%02X ", UART_GetByte(i));
+            p += 3;
+        }
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, 
+                  "PRE-FLUSH found %d bytes: %s", stale, dump);
+    }
     
-    // Step 2: Send the read command
+    UART_ConsumeBytes(stale);
     UART_SendByte(0x6A);
-    UART_SendByte(0x08);  // Read RMS_U (voltage)
+    UART_SendByte(0x08);
     g_tx_count += 2;
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "TX > 6A 08 (Total Sent: %u)", g_tx_count);
-    
-    // Step 3: DO NOT flush here - let RunQuick collect the 4-byte response
 }
 
 void HT7017_RunQuick(void) {
