@@ -183,13 +183,13 @@
 //   3. Read raw from log: "HT7017: [Current] raw=XXXXX"
 //   4. Set CURRENT_SCALE = (raw - HT7017_CURRENT_OFFSET) / actual_amps
 //   5. Recompile and verify
-#define HT7017_CURRENT_SCALE        1.0f    // TODO: calibrate with resistive load
+#define HT7017_CURRENT_SCALE        1727.45f    // TODO: calibrate with resistive load
 
 // Shunt ADC zero-current offset — the raw count with no current flowing.
 // Measured from your logs with no load: consistent ~450 counts.
 // Subtracted before applying CURRENT_SCALE so near-zero loads read ~0A.
 // Re-measure after any hardware change.
-#define HT7017_CURRENT_OFFSET       450.0f
+#define HT7017_CURRENT_OFFSET       462.0f
 
 // ─── Calibration: ACTIVE POWER ────────────────────────────────────────────────
 // ⚠ NOT YET CALIBRATED — shows raw signed counts until set.
@@ -211,7 +211,7 @@
 //   3. actual_watts = actual_volts × actual_amps  (for purely resistive load)
 //   4. Set POWER_SCALE = signed_raw / actual_watts
 //   5. Recompile and verify
-#define HT7017_POWER_SCALE          1.0f    // TODO: calibrate with resistive load
+#define HT7017_POWER_SCALE          -32.24f    // TODO: calibrate with resistive load
 
 // ─── OpenBeken Channel Mapping ────────────────────────────────────────────────
 // Map HT7017 measurements to OpenBeken channels for MQTT / automations.
