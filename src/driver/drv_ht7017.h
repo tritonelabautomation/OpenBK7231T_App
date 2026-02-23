@@ -161,7 +161,7 @@
 //   2026-02-22: 244.30V → raw 2,690,940 → scale 11,015.3
 //   2026-02-23: 220.00V → raw 2,480,000 → scale 11,023.0
 //   Average ≈ 11,019. Using first session (more precise reference meter).
-#define HT7017_VOLTAGE_SCALE        11015.3f
+#define HT7017_VOLTAGE_SCALE        10963.56f
 
 // ─── Calibration: FREQUENCY ───────────────────────────────────────────────────
 // ✓ CALIBRATED — derived from log, no equipment needed.
