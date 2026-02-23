@@ -217,11 +217,11 @@
 // Map HT7017 measurements to OpenBeken channels for MQTT / automations.
 // Change these channel numbers to match your setup.
 // Set to 0 to disable publishing for that measurement.
-#define HT7017_CHANNEL_VOLTAGE      6       // Channel to publish voltage (V)
-#define HT7017_CHANNEL_CURRENT      7       // Channel to publish current (A)
-#define HT7017_CHANNEL_POWER        8       // Channel to publish power (W)
-#define HT7017_CHANNEL_FREQ         9       // Channel to publish frequency (Hz)
-#define HT7017_CHANNEL_PF           10      // Channel to publish power factor (0–1)
+#define HT7017_CHANNEL_VOLTAGE      10       // Channel to publish voltage (V)
+#define HT7017_CHANNEL_CURRENT      11      // Channel to publish current (A)
+#define HT7017_CHANNEL_POWER        12       // Channel to publish power (W)
+#define HT7017_CHANNEL_FREQ         13      // Channel to publish frequency (Hz)
+#define HT7017_CHANNEL_PF           14      // Channel to publish power factor (0–1)
 
 // ─── Behaviour Tuning ─────────────────────────────────────────────────────────
 // Maximum consecutive missed responses before skipping to the next register.
