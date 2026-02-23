@@ -21,7 +21,6 @@
 #include "../new_cfg.h"
 #include "../new_pins.h"
 #include "../cmnds/cmd_public.h"
-#include "../channel/channel.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
