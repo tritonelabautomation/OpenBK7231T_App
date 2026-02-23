@@ -1,15 +1,10 @@
 /*
- * HT7017 Energy Metering IC — Driver for KWS-303WF  v9
+ * HT7017 Energy Metering IC — Driver for KWS-303WF  v10
  *
- * v9 fixes:
- *   - Removed CFG_SetExtended/CFG_GetExtended (don't exist in this build)
- *   - Removed CFG_Save_IfThrottled (doesn't exist in this build)
- *   - Removed CMD_RunSingleCommand (doesn't exist in this build)
- *   - Flash persistence via g_cfg.powerMeasurementCalibration[] — same
- *     struct used by BL0937/BL0942/CSE7766, saved by CFG_Save()
- *   - Channel publishing via CHANNEL_Set() directly
- *   - VoltageSet/CurrentSet/PowerSet update g_cfg and call CFG_Save()
- *     so the GUI calibration page works identically to BL0937
+ * Clean build — no channel.h, no powerMeasurementCalibration, no flash API.
+ * Scale factors are compile-time #defines in drv_ht7017.h.
+ * VoltageSet/CurrentSet/PowerSet update runtime variables only (no flash save).
+ * Channel publishing via CHANNEL_Set() from new_pins.h (already included).
  */
 
 #include "../obk_config.h"
@@ -30,16 +25,14 @@
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
 #endif
 
-// ─── Runtime scale factors ────────────────────────────────────────────────────
-// Initialised from g_cfg.powerMeasurementCalibration in HT7017_Init().
-// Falls back to compiled defaults if cfg values are zero/unset.
+// ─── Runtime scale factors (from #defines in header, updated by VoltageSet etc) ──
 static float g_vScale  = HT7017_DEFAULT_VOLTAGE_SCALE;
 static float g_iScale  = HT7017_DEFAULT_CURRENT_SCALE;
 static float g_pScale  = HT7017_DEFAULT_POWER_SCALE;
 static float g_fScale  = HT7017_DEFAULT_FREQ_SCALE;
 static float g_iOffset = HT7017_CURRENT_OFFSET;
 
-// ─── Last raw reading per channel (for VoltageSet/CurrentSet/PowerSet) ────────
+// ─── Last raw readings (for VoltageSet/CurrentSet/PowerSet) ──────────────────
 static uint32_t g_lastRawV = 0;
 static uint32_t g_lastRawI = 0;
 static uint32_t g_lastRawP = 0;
@@ -117,66 +110,18 @@ static void HT7017_BuildRegTable(void)
     g_regTable[3].unit       = "Hz";
     g_regTable[3].obk_ch     = HT7017_CHANNEL_FREQ;
 
-    // Apparent power uses its own scale (not shared with P1)
-    // Left at 1.0 until calibrated separately — reading shows raw counts for now
+    // S1 not yet calibrated — not published, scale placeholder
     g_regTable[4].reg        = HT7017_REG_POWER_S1;
     g_regTable[4].target     = &g_apparent;
-    g_regTable[4].scale      = &g_fScale;   // placeholder — S1 not yet calibrated
+    g_regTable[4].scale      = &g_fScale;
     g_regTable[4].is_signed  = 0;
     g_regTable[4].has_offset = 0;
     g_regTable[4].last_raw   = NULL;
     g_regTable[4].name       = "Apparent";
     g_regTable[4].unit       = "VA";
-    g_regTable[4].obk_ch     = 0;           // not published until calibrated
+    g_regTable[4].obk_ch     = 0;
 }
 #define REG_TABLE_SIZE 5
-
-// ─── Flash persistence via g_cfg.powerMeasurementCalibration ─────────────────
-//
-// g_cfg.powerMeasurementCalibration.values[] is the same array used by
-// BL0937/BL0942/CSE7766. Index layout (from new_pins.h enum):
-//   CFG_OBK_VOLTAGE = 0
-//   CFG_OBK_CURRENT = 1
-//   CFG_OBK_POWER   = 2
-//
-// Values stored as float via the cfgPowerMeasurementCal_t union (.f field).
-// CFG_Save() persists the entire g_cfg struct to flash — same as BL0937 does.
-
-static void HT7017_SaveScales(void)
-{
-    g_cfg.powerMeasurementCalibration.values[CFG_OBK_VOLTAGE].f = g_vScale;
-    g_cfg.powerMeasurementCalibration.values[CFG_OBK_CURRENT].f = g_iScale;
-    g_cfg.powerMeasurementCalibration.values[CFG_OBK_POWER].f   = g_pScale;
-    CFG_Save();
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017: Scales saved — V=%.2f I=%.2f P=%.4f",
-              g_vScale, g_iScale, g_pScale);
-}
-
-static void HT7017_LoadScales(void)
-{
-    float v = g_cfg.powerMeasurementCalibration.values[CFG_OBK_VOLTAGE].f;
-    float i = g_cfg.powerMeasurementCalibration.values[CFG_OBK_CURRENT].f;
-    float p = g_cfg.powerMeasurementCalibration.values[CFG_OBK_POWER].f;
-
-    // Only use saved values if they look valid (non-zero, not NaN)
-    if (v > 100.0f && v < 200000.0f) {
-        g_vScale = v;
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "HT7017: Loaded V scale from flash: %.2f", g_vScale);
-    }
-    if (i > 1.0f && i < 200000.0f) {
-        g_iScale = i;
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "HT7017: Loaded I scale from flash: %.2f", g_iScale);
-    }
-    // Power scale may be negative — check abs value
-    if (p != 0.0f && p > -10000.0f && p < 10000.0f) {
-        g_pScale = p;
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "HT7017: Loaded P scale from flash: %.4f", g_pScale);
-    }
-}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 static uint8_t HT7017_Checksum(uint8_t reg, uint8_t d2, uint8_t d1, uint8_t d0)
@@ -210,6 +155,18 @@ static void HT7017_UpdatePowerFactor(void)
     } else {
         g_power_factor = 0.0f;
     }
+}
+
+// ─── Channel publishing ────────────────────────────────────────────────────────
+// Uses CMD_ExecuteCommand("setChannel N VALUE") — no channel.h needed.
+// Values published as integer * 100 (e.g. 22751 = 227.51V).
+// Configure matching channels in OpenBeken as "divided by 100" type.
+static void HT7017_PublishChannel(uint8_t ch, float value)
+{
+    if (ch == 0) return;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "setChannel %u %d", ch, (int)(value * 100.0f));
+    CMD_ExecuteCommand(buf, 0);
 }
 
 // ─── Frame processing ─────────────────────────────────────────────────────────
@@ -253,14 +210,10 @@ static void HT7017_ProcessFrame(uint8_t d2, uint8_t d1, uint8_t d0, uint8_t cs)
                   r->name, value, r->unit, raw, g_goodFrames);
     }
 
-    // Publish to OpenBeken channel
-    if (r->obk_ch > 0) {
-        CHANNEL_Set(r->obk_ch, (int)(value * 100.0f), 0);
-    }
-
+    HT7017_PublishChannel(r->obk_ch, value);
     HT7017_UpdatePowerFactor();
     if (HT7017_CHANNEL_PF > 0) {
-        CHANNEL_Set(HT7017_CHANNEL_PF, (int)(g_power_factor * 100.0f), 0);
+        HT7017_PublishChannel(HT7017_CHANNEL_PF, g_power_factor);
     }
 }
 
@@ -273,8 +226,8 @@ static void HT7017_SendRequest(uint8_t reg)
 }
 
 // ─── VoltageSet / CurrentSet / PowerSet ───────────────────────────────────────
-// These are the commands the GUI calibration page calls.
-// Each one recomputes the scale from last_raw / actual_value, saves to flash.
+// Updates runtime scale only — no flash save.
+// To make permanent: update the #define in drv_ht7017.h and recompile.
 
 static commandResult_t CMD_VoltageSet(const void *ctx, const char *cmd,
                                        const char *args, int flags)
@@ -290,9 +243,9 @@ static commandResult_t CMD_VoltageSet(const void *ctx, const char *cmd,
     float old = g_vScale;
     g_vScale  = (float)g_lastRawV / actual;
     g_voltage = (float)g_lastRawV / g_vScale;
-    HT7017_SaveScales();
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017: VoltageSet %.2fV  raw=%u  scale %.2f→%.2f",
+              "HT7017: VoltageSet %.2fV raw=%u scale %.2f->%.2f "
+              "(update HT7017_DEFAULT_VOLTAGE_SCALE to make permanent)",
               actual, g_lastRawV, old, g_vScale);
     return CMD_RES_OK;
 }
@@ -317,9 +270,9 @@ static commandResult_t CMD_CurrentSet(const void *ctx, const char *cmd,
     float old = g_iScale;
     g_iScale  = net / actual;
     g_current = net / g_iScale;
-    HT7017_SaveScales();
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017: CurrentSet %.3fA  raw=%u net=%.0f  scale %.2f→%.2f",
+              "HT7017: CurrentSet %.3fA raw=%u net=%.0f scale %.2f->%.2f "
+              "(update HT7017_DEFAULT_CURRENT_SCALE to make permanent)",
               actual, g_lastRawI, net, old, g_iScale);
     return CMD_RES_OK;
 }
@@ -339,15 +292,15 @@ static commandResult_t CMD_PowerSet(const void *ctx, const char *cmd,
     if (s & 0x800000) s |= (int32_t)0xFF000000;
     if (s == 0) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "HT7017: PowerSet — signed raw=0, is load connected?");
+                  "HT7017: PowerSet — signed raw=0, load connected?");
         return CMD_RES_ERROR;
     }
     float old = g_pScale;
     g_pScale  = (float)s / actual;
     g_power   = (float)s / g_pScale;
-    HT7017_SaveScales();
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017: PowerSet %.1fW  raw=%u signed=%d  scale %.4f→%.4f",
+              "HT7017: PowerSet %.1fW raw=%u signed=%d scale %.4f->%.4f "
+              "(update HT7017_DEFAULT_POWER_SCALE to make permanent)",
               actual, g_lastRawP, s, old, g_pScale);
     return CMD_RES_OK;
 }
@@ -356,7 +309,7 @@ static commandResult_t CMD_PowerSet(const void *ctx, const char *cmd,
 static commandResult_t CMD_Status(const void *ctx, const char *cmd,
                                    const char *args, int flags)
 {
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╔══ HT7017 v9 Status ══╗");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╔══ HT7017 v10 Status ══╗");
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Voltage      : %.2f V",  g_voltage);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Current      : %.3f A",  g_current);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Active Power : %.1f W",  g_power);
@@ -373,8 +326,10 @@ static commandResult_t CMD_Status(const void *ctx, const char *cmd,
               "  Frames       : good=%u bad=%u miss=%u tx=%u",
               g_goodFrames, g_badFrames, g_totalMisses, g_txCount);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "  Calibrate    : VoltageSet <V>  CurrentSet <A>  PowerSet <W>");
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╚═══════════════════════╝");
+              "  To recalib   : VoltageSet <V> / CurrentSet <A> / PowerSet <W>");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  To persist   : copy scale from log to #define in drv_ht7017.h");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╚════════════════════════╝");
     return CMD_RES_OK;
 }
 
@@ -402,12 +357,9 @@ static commandResult_t CMD_NoParity(const void *ctx, const char *cmd,
 // ─── Init ─────────────────────────────────────────────────────────────────────
 void HT7017_Init(void)
 {
-    // Load calibration from g_cfg (same struct BL0937 uses, persists to flash)
-    HT7017_LoadScales();
-
     HT7017_BuildRegTable();
 
-    // Start on last index so first increment → index 0 (Voltage)
+    // Start on last index so first increment → index 0 (Voltage reg 0x08)
     g_regIndex    = REG_TABLE_SIZE - 1;
     g_missCount   = 0;
     g_totalMisses = 0;
@@ -418,26 +370,23 @@ void HT7017_Init(void)
     UART_InitReceiveRingBuffer(256);
     UART_InitUART(HT7017_BAUD_RATE, HT7017_PARITY_EVEN, 0);
 
-    // VoltageSet/CurrentSet/PowerSet — hooked into GUI calibration page
     CMD_RegisterCommand("VoltageSet",      CMD_VoltageSet, NULL);
     CMD_RegisterCommand("CurrentSet",      CMD_CurrentSet, NULL);
     CMD_RegisterCommand("PowerSet",        CMD_PowerSet,   NULL);
-
     CMD_RegisterCommand("HT7017_Status",   CMD_Status,     NULL);
     CMD_RegisterCommand("HT7017_Baud",     CMD_Baud,       NULL);
     CMD_RegisterCommand("HT7017_NoParity", CMD_NoParity,   NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v9: KWS-303WF  BK7231N→HT7017 direct  shunt");
+              "HT7017 v10: KWS-303WF  BK7231N->HT7017 direct  shunt");
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v9: %s  4800 8E1",
+              "HT7017 v10: %s  4800 8E1",
               CFG_HasFlag(26) ? "UART2 (Pin 6/7)" : "UART1 (P10=RX P11=TX)");
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v9: Scales V=%.2f I=%.2f P=%.4f F=%.1f  offset=%.0f",
+              "HT7017 v10: V=%.2f I=%.2f P=%.4f F=%.1f offset=%.0f",
               g_vScale, g_iScale, g_pScale, g_fScale, g_iOffset);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v9: %u regs/cycle  Channels V=%u I=%u P=%u F=%u PF=%u",
-              REG_TABLE_SIZE,
+              "HT7017 v10: Channels V=%u I=%u P=%u F=%u PF=%u",
               HT7017_CHANNEL_VOLTAGE, HT7017_CHANNEL_CURRENT,
               HT7017_CHANNEL_POWER,   HT7017_CHANNEL_FREQ,
               HT7017_CHANNEL_PF);
@@ -475,7 +424,7 @@ void HT7017_RunEverySecond(void)
 
         if (g_missCount >= HT7017_MAX_MISS_COUNT) {
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                      "HT7017: %u misses on 0x%02X — skip",
+                      "HT7017: %u misses on 0x%02X - skip",
                       HT7017_MAX_MISS_COUNT, g_regTable[g_regIndex].reg);
             g_regIndex  = (g_regIndex + 1) % REG_TABLE_SIZE;
             g_missCount = 0;
@@ -499,7 +448,7 @@ void HT7017_RunQuick(void)
     uint8_t cs = UART_GetByte(3);
     UART_ConsumeBytes(HT7017_RESPONSE_LEN);
     HT7017_ProcessFrame(d2, d1, d0, cs);
-    // Do NOT advance g_regIndex here — RunEverySecond manages rotation
+    // Do NOT advance g_regIndex — RunEverySecond manages rotation
 }
 
 // ─── HTTP Status Page ─────────────────────────────────────────────────────────
@@ -507,7 +456,7 @@ void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
 {
     char tmp[768];
     snprintf(tmp, sizeof(tmp),
-        "<h5>HT7017 — KWS-303WF</h5>"
+        "<h5>HT7017 - KWS-303WF</h5>"
         "<table border='1' cellpadding='4' style='border-collapse:collapse'>"
         "<tr><th>Parameter</th><th>Value</th></tr>"
         "<tr><td>Voltage</td><td><b>%.2f V</b></td></tr>"
