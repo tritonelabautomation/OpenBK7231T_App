@@ -161,7 +161,7 @@
 //   2026-02-22: 244.30V → raw 2,690,940 → scale 11,015.3
 //   2026-02-23: 220.00V → raw 2,480,000 → scale 11,023.0
 //   Average ≈ 11,019. Using first session (more precise reference meter).
-#define HT7017_VOLTAGE_SCALE        10963.56f
+#define HT7017_VOLTAGE_SCALE        10829.90f
 
 // ─── Calibration: FREQUENCY ───────────────────────────────────────────────────
 // ✓ CALIBRATED — derived from log, no equipment needed.
@@ -183,7 +183,7 @@
 //   3. Read raw from log: "HT7017: [Current] raw=XXXXX"
 //   4. Set CURRENT_SCALE = (raw - HT7017_CURRENT_OFFSET) / actual_amps
 //   5. Recompile and verify
-#define HT7017_CURRENT_SCALE        2317.37    // TODO: calibrate with resistive load
+#define HT7017_CURRENT_SCALE        2367.61f    // TODO: calibrate with resistive load
 
 // Shunt ADC zero-current offset — the raw count with no current flowing.
 // Measured from your logs with no load: consistent ~450 counts.
@@ -211,7 +211,7 @@
 //   3. actual_watts = actual_volts × actual_amps  (for purely resistive load)
 //   4. Set POWER_SCALE = signed_raw / actual_watts
 //   5. Recompile and verify
-#define HT7017_POWER_SCALE          -32.24f    // TODO: calibrate with resistive load
+#define HT7017_POWER_SCALE          -3.161f    // TODO: calibrate with resistive load
 
 // ─── OpenBeken Channel Mapping ────────────────────────────────────────────────
 // Map HT7017 measurements to OpenBeken channels for MQTT / automations.
