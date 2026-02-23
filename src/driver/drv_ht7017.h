@@ -168,7 +168,7 @@
 // Formula: FREQ_SCALE = raw_reading / actual_hz
 // Evidence: 50Hz grid → raw 9991–10006 → scale = 10000/50 = 200.0
 // Confirmed across 100+ samples. Grid variation ±0.03Hz is normal.
-#define HT7017_FREQ_SCALE           500000.0f
+#define HT7017_FREQ_SCALE           200.0f
 
 // ─── Calibration: CURRENT ─────────────────────────────────────────────────────
 // ⚠ NOT YET CALIBRATED — shows raw ADC counts until set.
