@@ -183,7 +183,7 @@
 //   3. Read raw from log: "HT7017: [Current] raw=XXXXX"
 //   4. Set CURRENT_SCALE = (raw - HT7017_CURRENT_OFFSET) / actual_amps
 //   5. Recompile and verify
-#define HT7017_CURRENT_SCALE        1727.45f    // TODO: calibrate with resistive load
+#define HT7017_CURRENT_SCALE        2317.37    // TODO: calibrate with resistive load
 
 // Shunt ADC zero-current offset — the raw count with no current flowing.
 // Measured from your logs with no load: consistent ~450 counts.
