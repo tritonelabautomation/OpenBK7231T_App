@@ -404,141 +404,71 @@ static void ST7735_DrawStaticFrame(void)
 }
 
 void ST7735_DrawEnergyScreen(float v, float a, float w, float kwh, float pf, 
-                             float hz, float temp_c, uint8_t relay_on)
+                           float hz, float temp_c, uint8_t relay_on)
 {
     if (!g_initialized) return;
     char buf[16];
 
-    // 1. Status Row: Green ON/OFF + Blue Hz
+    // 1. Status Row: GREEN ON/OFF + BLUE Hz
     const char *on_str = relay_on ? "ON " : "OFF";
     if (strcmp(on_str, g_prev_on) != 0) {
         strncpy(g_prev_on, on_str, sizeof(g_prev_on)-1);
         UpdateZone(0, ROW_STATUS_Y, 24, ROW_STATUS_H, on_str, ST7735_GREEN, SML_S);
     }
-    
     snprintf(buf, sizeof(buf), "%2.0fHz", hz);
     if (strcmp(buf, g_prev_hz) != 0) {
         strncpy(g_prev_hz, buf, sizeof(g_prev_hz)-1);
         UpdateZone(45, ROW_STATUS_Y, 35, ROW_STATUS_H, buf, ST7735_BLUE, SML_S);
     }
 
-    // 2. Large Values (Blue Voltage, Red Current, Yellow Power)
+    // 2. VOLTAGE = **RED** scale2 (Y=12)
     snprintf(buf, sizeof(buf), "%5.1f", v);
     if (strcmp(buf, g_prev_v) != 0) {
         strncpy(g_prev_v, buf, sizeof(g_prev_v)-1);
-        UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_BLUE, VAL_S);
+        UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, VAL_S);  // FIXED: RED
     }
 
+    // 3. CURRENT = **YELLOW** scale2 (Y=38)  
     snprintf(buf, sizeof(buf), "%5.3f", a);
     if (strcmp(buf, g_prev_a) != 0) {
         strncpy(g_prev_a, buf, sizeof(g_prev_a)-1);
-        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_RED, VAL_S);
+        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_YELLOW, VAL_S); // FIXED: YELLOW
     }
 
+    // 4. POWER = **BLUE** scale2 (Y=64)
     snprintf(buf, sizeof(buf), "%5.1f", w);
     if (strcmp(buf, g_prev_w) != 0) {
         strncpy(g_prev_w, buf, sizeof(g_prev_w)-1);
-        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_YELLOW, VAL_S);
+        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_BLUE, VAL_S);   // FIXED: BLUE
     }
 
-    // 3. Small Values (Cyan kWh, Red PF, Red Temp)
-    snprintf(buf, sizeof(buf), "%07.3f", kwh);
+    // 5. kWh = CYAN scale1 (Y=90)
+    snprintf(buf, sizeof(buf), "%6.3f", kwh);
     if (strcmp(buf, g_prev_kwh) != 0) {
         strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh)-1);
         UpdateZone(0, ROW_KWH_Y, 48, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
     }
 
+    // 6. PF = RED scale1 (Y=106)
     snprintf(buf, sizeof(buf), "%4.2f", pf);
     if (strcmp(buf, g_prev_pf) != 0) {
-        strncpy(g_prev_pf, buf, sizeof(g_prev_pf)-1);
+        strncpy(g_prev_pf, sizeof(g_prev_pf)-1);
         UpdateZone(0, ROW_PF_Y, 25, ROW_PF_H, buf, ST7735_RED, SML_S);
     }
 
-    snprintf(buf, sizeof(buf), "%2.0f C", temp_c);
+    // 7. TEMP = ORANGE scale1 (Y=122)
+    snprintf(buf, sizeof(buf), "%4.1fC", temp_c);
     if (strcmp(buf, g_prev_tc) != 0) {
         strncpy(g_prev_tc, buf, sizeof(g_prev_tc)-1);
-        UpdateZone(55, ROW_TEMP_Y, 25, ROW_TEMP_H, buf, ST7735_RED, SML_S);
+        UpdateZone(0, ROW_TEMP_Y, 35, ROW_TEMP_H, buf, ST7735_ORANGE, SML_S);  // FIXED: ORANGE
     }
 
-    // 4. IP Footer
+    // 8. IP = WHITE scale1 (Y=142)
     extern char* WIFI_GetIP(void);
     char *ip = WIFI_GetIP();
     if (ip && strcmp(ip, g_prev_ip) != 0) {
         strncpy(g_prev_ip, ip, sizeof(g_prev_ip)-1);
         UpdateZone(22, ROW_IP_Y, 58, ROW_IP_H, ip, ST7735_WHITE, SML_S);
-    }
-}
-
-// Public energy screen update — FLICKER-FREE
-void ST7735_DrawEnergyScreen(float v, float a, float w, float kwh, float pf, 
-                           float hz, float temp_c, uint8_t relay_on)
-{
-    if (!g_initialized) return;
-    char buf[16];
-
-    // Status row - ON/OFF + WiFi
-    const char *on_str = relay_on ? "ON " : "OFF ";
-    if (strcmp(on_str, g_prev_on) != 0) {
-        strncpy(g_prev_on, on_str, sizeof(g_prev_on)-1);
-        ST7735_FillRect(0, ROW_STATUS_Y, 32, ROW_STATUS_H, ST7735_BLACK);
-        ST7735_DrawString(2, ROW_STATUS_Y+2, on_str,
-                         relay_on ? ST7735_GREEN : ST7735_GREY, 
-                         ST7735_BLACK, 1);
-    }
-
-    // VOLTAGE - scale2 RED
-    snprintf(buf, sizeof(buf), "%5.1f", v);
-    if (strcmp(buf, g_prev_v) != 0) {
-        strncpy(g_prev_v, buf, sizeof(g_prev_v)-1);
-        UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, VAL_S);
-    }
-
-    // CURRENT - scale2 YELLOW  
-    snprintf(buf, sizeof(buf), "%5.3f", a);
-    if (strcmp(buf, g_prev_a) != 0) {
-        strncpy(g_prev_a, buf, sizeof(g_prev_a)-1);
-        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_YELLOW, VAL_S);
-    }
-
-    // POWER - scale2 BLUE
-    snprintf(buf, sizeof(buf), "%5.1f", w);
-    if (strcmp(buf, g_prev_w) != 0) {
-        strncpy(g_prev_w, buf, sizeof(g_prev_w)-1);
-        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_BLUE, VAL_S);
-    }
-
-    // KWH - scale1 CYAN
-    snprintf(buf, sizeof(buf), "%7.3f", kwh);
-    if (strcmp(buf, g_prev_kwh) != 0) {
-        strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh)-1);
-        UpdateZone(SML_VAL_X, ROW_KWH_Y, SML_VAL_W, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
-    }
-
-    // PF + HZ - split row
-    snprintf(buf, sizeof(buf), "%4.2f", pf);
-    if (strcmp(buf, g_prev_pf) != 0) {
-        strncpy(g_prev_pf, buf, sizeof(g_prev_pf)-1);
-        UpdateZone(SML_VAL_X, ROW_PF_Y, 20, ROW_PF_H, buf, ST7735_RED, SML_S);
-    }
-    snprintf(buf, sizeof(buf), "%2d", (int)hz);
-    if (strcmp(buf, g_prev_hz) != 0) {
-        strncpy(g_prev_hz, buf, sizeof(g_prev_hz)-1);
-        UpdateZone(44, ROW_PF_Y, 16, ROW_PF_H, buf, ST7735_BLUE, SML_S);
-    }
-
-    // TEMP - scale1 ORANGE
-    snprintf(buf, sizeof(buf), "%4.1fC", temp_c);
-    if (strcmp(buf, g_prev_tc) != 0) {
-        strncpy(g_prev_tc, buf, sizeof(g_prev_tc)-1);
-        UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H, buf, ST7735_ORANGE, SML_S);
-    }
-
-    // IP ADDRESS - scale1 WHITE
-    extern char* WIFI_GetIP(void);
-    char *ip = WIFI_GetIP();
-    if (ip && strcmp(ip, g_prev_ip) != 0) {
-        strncpy(g_prev_ip, ip, sizeof(g_prev_ip)-1);
-        UpdateZone(18, ROW_IP_Y, 62, ROW_IP_H, ip, ST7735_WHITE, 1);
     }
 }
 
