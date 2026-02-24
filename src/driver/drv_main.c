@@ -39,6 +39,7 @@ typedef struct driver_s {
 
 void TuyaMCU_RunEverySecond();
 void GirierMCU_RunEverySecond();
+extern void ST7735_Init();
 
 // startDriver BL0937
 static driver_t g_drivers[] = {
@@ -1035,6 +1036,22 @@ static driver_t g_drivers[] = {
 		NULL,                                    // onChannelChanged
 		NULL,                                    // onHassDiscovery
 		false,                                   // loaded
+	},
+#endif
+#if ENABLE_DRIVER_ST7735
+	//drvdetail:{"name":"ST7735",
+	//drvdetail:"title":"ST7735",
+	//drvdetail:"descr":"ST7735 TFT display driver.",
+	//drvdetail:"requires":""}
+	{ "ST7735",                              // Driver Name
+		ST7735_Init,                         // Init
+		NULL,                                // onEverySecond
+		NULL,                                // appendInformationToHTTPIndexPage
+		NULL,                                // runQuickTick
+		NULL,                                // stopFunction
+		NULL,                                // onChannelChanged
+		NULL,                                // onHassDiscovery
+		false,                               // loaded
 	},
 #endif
 #if ENABLE_DRIVER_BMP280
