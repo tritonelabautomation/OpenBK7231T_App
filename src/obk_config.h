@@ -293,7 +293,6 @@
 #define ENABLE_DRIVER_SM16703P					0
 #define ENABLE_DRIVER_PIXELANIM					0
 #define ENABLE_DRIVER_SM15155E					0
-
 #endif
 // parse things like $CH1 or $hour etc
 #define ENABLE_EXPAND_CONSTANT					1
