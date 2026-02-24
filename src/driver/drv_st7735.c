@@ -45,6 +45,7 @@
 #include "../new_cfg.h"
 #include "../new_pins.h"
 #include "../cmnds/cmd_public.h"
+#include "font_5x7.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -333,6 +334,18 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
     }
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WiFi SYMBOL - MOVED UP (Fixes static forward declaration)
+// ═══════════════════════════════════════════════════════════════════════════════
+static void DrawWiFiSymbol(uint8_t x, uint8_t y) {
+    ST7735_FillRect(x+0, y+6, 1, 2, ST7735_BLUE);
+    ST7735_FillRect(x+2, y+5, 1, 3, ST7735_BLUE);
+    ST7735_FillRect(x+4, y+3, 1, 5, ST7735_BLUE);
+    ST7735_FillRect(x+6, y+1, 1, 7, ST7735_BLUE);
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION F — FLICKER-FREE ENERGY SCREEN
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -406,14 +419,6 @@ static void ST7735_DrawStaticFrame(void)
     ST7735_DrawString(0, ty, "Tmp:", ST7735_ORANGE, ST7735_BLACK, SML_S);
     DrawWiFiSymbol(18, 1);                    // Static WiFi icon
     ST7735_DrawString(2, 147, "IP:", ST7735_GREY, ST7735_BLACK, 1);
-}
-
-// Add WiFi function:
-static void DrawWiFiSymbol(uint8_t x, uint8_t y) {
-    ST7735_FillRect(x+0, y+6, 1, 2, ST7735_BLUE);
-    ST7735_FillRect(x+2, y+5, 1, 3, ST7735_BLUE);
-    ST7735_FillRect(x+4, y+3, 1, 5, ST7735_BLUE);
-    ST7735_FillRect(x+6, y+1, 1, 7, ST7735_BLUE);
 }
 
 
