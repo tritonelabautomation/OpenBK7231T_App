@@ -408,7 +408,7 @@ static void ST7735_DrawStaticFrame(void)
     ST7735_DrawString(0, ROW_IP_Y + 2, "IP:", ST7735_WHITE, ST7735_BLACK, SML_S);
 }
 
-static char* GetCurrentIP(void);
+static void GetCurrentIP(char *buf, int bufsz);  // ← Add parameters
 
 // Public energy screen update — FLICKER-FREE
 void ST7735_DrawEnergyScreen(float v, float a, float w,
