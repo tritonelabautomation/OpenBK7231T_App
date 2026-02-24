@@ -60,7 +60,7 @@
 #define ST7735_HEIGHT       160
 
 // ST7735S chip RAM = 132×162; visible 80×160 starts at these offsets
-#define ST7735_COL_OFFSET   25
+#define ST7735_COL_OFFSET   24
 #define ST7735_ROW_OFFSET   0
 
 // ─── ST7735S command bytes ─────────────────────────────────────────────────────
