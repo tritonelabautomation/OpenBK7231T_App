@@ -667,6 +667,8 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_res);
     HAL_PIN_Setup_Output(g_pin_dc);
     HAL_PIN_Setup_Output(g_pin_cs);
+    HAL_PIN_Setup_Output(g_pin_blk);
+    SPI_BLK_L();   // LEDK LOW = backlight ON (inverted logic)
 
     // Safe initial states
     SPI_CS_H();
