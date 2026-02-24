@@ -694,7 +694,7 @@ void ST7735_Init(void)
 
     // Splash screen
     ST7735_DrawString(2, 20, "KWS-303WF",  ST7735_CYAN,   ST7735_BLACK, 1);
-    ST7735_DrawString(2, 34, "HT7017 v11", ST7735_GREEN,  ST7735_BLACK, 1);
+    ST7735_DrawString(2, 34, "HT7017 v13", ST7735_GREEN,  ST7735_BLACK, 1);
     ST7735_DrawString(2, 48, "Starting..", ST7735_YELLOW, ST7735_BLACK, 1);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
