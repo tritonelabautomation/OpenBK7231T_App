@@ -1045,7 +1045,7 @@ static driver_t g_drivers[] = {
 	//drvdetail:"requires":""}
 	{ "ST7735",                              // Driver Name
 		ST7735_Init,                         // Init
-		NULL,                                // onEverySecond
+		ST7735_RunEverySecond,                                // onEverySecond
 		NULL,                                // appendInformationToHTTPIndexPage
 		NULL,                                // runQuickTick
 		NULL,                                // stopFunction
