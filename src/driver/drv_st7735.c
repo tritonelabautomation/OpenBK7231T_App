@@ -557,28 +557,22 @@ static commandResult_t CMD_ST7735_Clear(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
+// drv_st7735.c - CMD_ST7735_Brightness (GPIO ONLY)
 static commandResult_t CMD_ST7735_Brightness(const void *ctx, const char *cmd, const char *args, int flags)
 {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     
     int val = atoi(args); 
-    if (val < 0) val = 0;
-    if (val > 100) val = 100;
-
-    // === FIXED: Direct Tuya SDK (exists in tuya_drv_pin.o) ===
-    tuya_pin_func_set((unsigned char)g_pin_blk, 4);  // BIT_PWM_FUNC=4
-    
-    int pwm_ch = PIN_GetPWMIndexForPinIndex(g_pin_blk);
-    if (pwm_ch < 0) return CMD_RES_BAD_ARGUMENT;
-
-    unsigned int period = 1000;
-    unsigned int duty = (100 - val) * 10;  // Inverted for KWS-303WF
-
-    bk_pwm_initialize((unsigned char)pwm_ch, period, duty, 0, 0);
-    bk_pwm_start((unsigned char)pwm_ch);
-
+    if (val > 0) {
+        HAL_PIN_SetOutputValue(g_pin_blk, 1);  // ON
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: backlight ON");
+    } else {
+        HAL_PIN_SetOutputValue(g_pin_blk, 0);  // OFF
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: backlight OFF");
+    }
     return CMD_RES_OK;
 }
+
 
 static commandResult_t CMD_ST7735_Goto(const void *ctx, const char *cmd,
                                         const char *args, int flags)
@@ -687,9 +681,6 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_res);
     HAL_PIN_Setup_Output(g_pin_dc);
     HAL_PIN_Setup_Output(g_pin_cs);
-    
-    // Initial PWM setup (safe defaults)
-    tuya_pin_func_set((unsigned char)g_pin_blk, BIT_PWM_FUNC);
     HAL_PIN_SetOutputValue(g_pin_blk, 1);  // Full brightness start
 
 
