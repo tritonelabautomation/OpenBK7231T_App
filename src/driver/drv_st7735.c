@@ -136,10 +136,11 @@ static void ST7735_WriteData16(uint16_t d)
 
 static void ST7735_Delay(uint32_t ms)
 {
-    // OpenBeken: use the platform delay if available
-    // Fallback to spin loop if not
-    extern void rtos_delay_milliseconds(uint32_t ms);
-    (void)rtos_delay_milliseconds(ms); 
+    // SDK signature from beken378/os/include/rtos_pub.h line 292:
+    // OSStatus rtos_delay_milliseconds(uint32_t num_ms);
+    // OSStatus is typically int/long — we cast to void to discard return value.
+    extern int rtos_delay_milliseconds(uint32_t num_ms);
+    (void)rtos_delay_milliseconds(ms);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
