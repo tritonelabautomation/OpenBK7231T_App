@@ -478,6 +478,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
         UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H, buf, ST7735_ORANGE, SML_S);
     }
 
+ /*
     // IP:192.168.1.x  ← WHITE scale1  ← NEW ROW
     char ipbuf[16];
     GetCurrentIP(ipbuf, sizeof(ipbuf));
@@ -487,6 +488,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
         ST7735_DrawString(0, ROW_IP_Y + 2, "IP:", ST7735_WHITE, ST7735_BLACK, SML_S);
         ST7735_DrawString(SML_VAL_X, ROW_IP_Y + 2, ipbuf, ST7735_WHITE, ST7735_BLACK, SML_S);
     }
+    */
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -655,10 +657,10 @@ void ST7735_Init(void)
 static uint8_t g_refresh_counter = 0;
 
 // Get current IP (same method OpenBeken uses)
-static void GetCurrentIP(char *buf, int bufsz) {
-    extern char g_wifi_ip[16];
-    strncpy(buf, g_wifi_ip[0] ? g_wifi_ip : "No IP", bufsz - 1);
-}
+//static void GetCurrentIP(char *buf, int bufsz) {
+//    extern char g_wifi_ip[16];
+//    strncpy(buf, g_wifi_ip[0] ? g_wifi_ip : "No IP", bufsz - 1);
+//}
 
 
 void ST7735_RunEverySecond(void)
