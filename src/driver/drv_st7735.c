@@ -714,7 +714,7 @@ void ST7735_RunEverySecond(void)
     if (!g_initialized) return;
 
     g_refresh_counter++;
-    if (g_refresh_counter < 5) return;
+    if (g_refresh_counter < 10) return;
     g_refresh_counter = 0;
 
     extern float HT7017_GetVoltage(void);
