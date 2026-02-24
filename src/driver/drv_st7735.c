@@ -649,10 +649,14 @@ static commandResult_t CMD_ST7735_Scale(const void *ctx, const char *cmd,
 void ST7735_Init(void)
 {
     // Parse pin args from startDriver command if provided
-    // Format: startDriver ST7735 SCK SDA RES DC CS [BLK]
-    // Pins are stored by the driver framework before Init() is called —
-    // retrieve from PIN_FindPinIndexForRole or just use the defaults
-    // set at top of file (user can override via header #defines).
+    // Syntax: startDriver ST7735 <SCK> <SDA> <RES> <DC> <CS>
+    if (Tokenizer_GetArgsCount() >= 5) {
+        g_pin_sck = Tokenizer_GetArgIntegerDefault(1, ST7735_DEFAULT_SCK);
+        g_pin_sda = Tokenizer_GetArgIntegerDefault(2, ST7735_DEFAULT_SDA);
+        g_pin_res = Tokenizer_GetArgIntegerDefault(3, ST7735_DEFAULT_RES);
+        g_pin_dc  = Tokenizer_GetArgIntegerDefault(4, ST7735_DEFAULT_DC);
+        g_pin_cs  = Tokenizer_GetArgIntegerDefault(5, ST7735_DEFAULT_CS);
+    }
 
     // Setup all GPIO as outputs
     HAL_PIN_Setup_Output(g_pin_sck);
@@ -660,14 +664,12 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_res);
     HAL_PIN_Setup_Output(g_pin_dc);
     HAL_PIN_Setup_Output(g_pin_cs);
-    HAL_PIN_Setup_Output(g_pin_blk);
 
     // Safe initial states
     SPI_CS_H();
     SPI_SCK_L();
     SPI_SDA_L();
     SPI_DC_H();
-    SPI_BLK_H();   // backlight ON
 
     // Hardware reset then controller init
     ST7735_HardReset();
@@ -693,8 +695,8 @@ void ST7735_Init(void)
     ST7735_DrawString(2, 48, "Starting..", ST7735_YELLOW, ST7735_BLACK, 1);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: init  SCK=%d SDA=%d RES=%d DC=%d CS=%d BLK=%d",
-              g_pin_sck, g_pin_sda, g_pin_res, g_pin_dc, g_pin_cs, g_pin_blk);
+              "ST7735: init  SCK=%d SDA=%d RES=%d DC=%d CS=%d",
+              g_pin_sck, g_pin_sda, g_pin_res, g_pin_dc, g_pin_cs);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "ST7735: 80x160 RGB565  offset col=%d row=%d",
               ST7735_COL_OFFSET, ST7735_ROW_OFFSET);
