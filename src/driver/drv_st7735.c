@@ -560,21 +560,23 @@ static commandResult_t CMD_ST7735_Brightness(const void *ctx, const char *cmd,
 {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     
-    // MODIFIED FOR PWM: Now accepts 0-100 for dimming
     int val = atoi(args); 
-    
     if (val < 0) val = 0;
     if (val > 100) val = 100;
 
-    // Logic: Inverted PWM. 
-    // If val is 100 (Max Brightness), we want pin LOW (0 duty)
-    // If val is 0 (Off), we want pin HIGH (100 duty)
-    float duty = 100.0f - (float)val; 
-    
-    HAL_PWM_Start(g_pin_blk, duty);
+    // Period of 1000 provides a good frequency (~26kHz) and easy 0-1000 scaling
+    unsigned int period = 1000;
+    // Inverted logic for KWS-303WF: 100% Brightness = Pin LOW
+    // So if val is 100, duty should be 0. If val is 0, duty should be 1000.
+    unsigned int duty = (100 - val) * 10; 
+
+    // Initialize/Update PWM settings and start
+    tuya_hal_pwm_init(g_pin_blk, period, duty);
+    tuya_hal_pwm_start(g_pin_blk);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: brightness set to %d%% (PWM Duty: %.1f)", val, duty);
+              "ST7735: PWM brightness set to %d%% (Duty: %u/1000)", val, duty);
+
     return CMD_RES_OK;
 }
 
