@@ -220,9 +220,10 @@ static void ST7735_InitController(void)
     // ── Memory data access control ──────────────────────────────────────────
     // Portrait 80×160: MX+MV = landscape reading from chip RAM
     // For our display: MX | MV | BGR gives correct portrait orientation
+    // ── Memory data access control ──────────────────────────────────────────
+    // Standard Portrait mode (No MV flag)
     ST7735_WriteCmd(ST77_MADCTL);
-    ST7735_WriteData8(MADCTL_MX | MADCTL_MV | MADCTL_BGR);
-
+    ST7735_WriteData8(MADCTL_MY | MADCTL_MX | MADCTL_BGR);
     // ── Colour mode: 16-bit RGB565 ──────────────────────────────────────────
     ST7735_WriteCmd(ST77_COLMOD);
     ST7735_WriteData8(0x05);   // 0x05 = 16bpp
