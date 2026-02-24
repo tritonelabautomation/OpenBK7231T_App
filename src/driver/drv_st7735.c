@@ -70,8 +70,9 @@ static uint8_t  g_txt_scale = ST7735_TEXT_SCALE_LARGE;
 #define SPI_DC_L()    HAL_PIN_SetOutputValue(g_pin_dc,  0)   // command
 #define SPI_RES_H()   HAL_PIN_SetOutputValue(g_pin_res, 1)
 #define SPI_RES_L()   HAL_PIN_SetOutputValue(g_pin_res, 0)
-// Use the Tuya HAL which is already included in the BK7231N build
-// Direct SDK calls for the BK7231N "new" PWM hardware
+// Direct SDK call to switch a GPIO pin to its PWM function
+extern void gpio_config_pwm_enable(unsigned char pin);
+// Direct SDK calls for the BK7231N "new" PWM hardware (5 arguments required)
 extern void bk_pwm_initialize(unsigned char channel, unsigned int period, unsigned int duty, unsigned int duty2, unsigned int duty3);
 extern void bk_pwm_start(unsigned char channel);
 
@@ -561,29 +562,19 @@ static commandResult_t CMD_ST7735_Brightness(const void *ctx, const char *cmd,
 {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     
-    // NEW: Accepts 0 to 100 for percentage brightness
     int val = atoi(args); 
     if (val < 0) val = 0;
     if (val > 100) val = 100;
 
-    // Map physical pin (e.g., P26) to its hardware PWM channel
     int pwm_ch = PIN_GetPWMIndexForPinIndex(g_pin_blk);
-    if (pwm_ch < 0) {
-        addLogAdv(LOG_ERROR, LOG_FEATURE_ENERGY, "ST7735: Pin %d is not PWM capable", g_pin_blk);
-        return CMD_RES_BAD_ARGUMENT;
-    }
+    if (pwm_ch < 0) return CMD_RES_BAD_ARGUMENT;
 
-    // Logic: Inverted PWM for KWS-303WF (Pin LOW = ON)
-    // 100% Brightness = 0 Duty | 0% Brightness = 1000 Duty
+    // Inverted logic: 100% Brightness = 0 Duty | 0% Brightness = 1000 Duty
     unsigned int period = 1000;
     unsigned int duty = (100 - val) * 10; 
 
-    // Use native BK SDK calls with correct number of arguments for N chip
     bk_pwm_initialize((unsigned char)pwm_ch, period, duty, 0, 0);
     bk_pwm_start((unsigned char)pwm_ch);
-
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: PWM Ch %d set to %d%% (Duty: %u)", pwm_ch, val, duty);
 
     return CMD_RES_OK;
 }
@@ -696,11 +687,11 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_dc);
     HAL_PIN_Setup_Output(g_pin_cs);
     
-    // NEW: Setup BLK pin for PWM hardware mode instead of standard Output
-    HAL_PIN_Setup_PWM(g_pin_blk); 
-    // Set initial brightness to 100% using our new command
+    // Set the physical pin to PWM mode
+    gpio_config_pwm_enable((unsigned char)g_pin_blk); 
+    
+    // Set initial brightness to 100%
     CMD_ExecuteCommand("st7735_brightness 100", 0);
-    //SPI_BLK_L();   // LEDK LOW = backlight ON (inverted logic)
 
     // Safe initial states
     SPI_CS_H();
