@@ -607,7 +607,7 @@ void ST7735_Init(void)
     SPI_RES_H();
 
     // Backlight ON immediately — so we can see if panel powers up
-    SPI_BLK_H();
+    SPI_BLK_L();
     ST7735_Delay(50);
 
     // Hardware reset + controller init
