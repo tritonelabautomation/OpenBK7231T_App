@@ -63,8 +63,8 @@
 
 // Column/row offsets — green-tab 80×160 variant uses these
 // (chip RAM is 132×162; our visible area starts at col+2, row+1)
-#define ST7735_COL_OFFSET   2   // for 80px wide on 132px RAM: (132-80)/2 = 26
-#define ST7735_ROW_OFFSET   0    // standard for this panel
+#define ST7735_COL_OFFSET   0   // for 80px wide on 132px RAM: (132-80)/2 = 26
+#define ST7735_ROW_OFFSET   1    // standard for this panel
 
 // ─── ST7735S command set ──────────────────────────────────────────────────────
 #define ST77_NOP        0x00
