@@ -139,7 +139,7 @@ static void ST7735_Delay(uint32_t ms)
     // OpenBeken: use the platform delay if available
     // Fallback to spin loop if not
     extern void rtos_delay_milliseconds(uint32_t ms);
-    rtos_delay_milliseconds(ms);
+    (void)rtos_delay_milliseconds(ms); 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
