@@ -1611,12 +1611,6 @@ void DRV_StartDriver(const char* name) {
 			}
 		}
 	}
-#if ENABLE_DRIVER_ST7735
-    if (!stricmp(name, "ST7735")) {
-        ST7735_Init();
-        bError = false;
-    }
-#endif
 #if (ENABLE_DRIVER_DS1820) && (ENABLE_DRIVER_DS1820_FULL)
 	if (!bStarted && !twinrunning) {
 #else
