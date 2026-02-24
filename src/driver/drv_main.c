@@ -1037,6 +1037,12 @@ static driver_t g_drivers[] = {
 		false,                                   // loaded
 	},
 #endif
+#if ENABLE_DRIVER_ST7735
+    if (!strcmp(driverName, "ST7735")) {
+        ST7735_Init();
+        return;
+    }
+#endif
 #if ENABLE_DRIVER_BMP280
 	//drvdetail:{"name":"BMP280",
 	//drvdetail:"title":"TODO",
