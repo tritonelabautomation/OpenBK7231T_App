@@ -215,7 +215,7 @@ static void ST7735_InitController(void)
     ST7735_WriteData8(0x0E);
 
     // ── Display inversion ON (needed for correct colours on this panel) ─────
-    ST7735_WriteCmd(ST77_INVON);
+    ST7735_WriteCmd(ST77_INVOFF);
 
     // ── Memory data access control ──────────────────────────────────────────
     // Portrait 80×160: MX+MV = landscape reading from chip RAM
