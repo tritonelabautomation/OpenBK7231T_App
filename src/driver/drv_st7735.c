@@ -222,8 +222,10 @@ static void ST7735_InitController(void)
     // For our display: MX | MV | BGR gives correct portrait orientation
     // ── Memory data access control ──────────────────────────────────────────
     // Standard Portrait mode (No MV flag)
+    // ── Memory data access control ──────────────────────────────────────────
+    // Standard Portrait mode (Right-side up)
     ST7735_WriteCmd(ST77_MADCTL);
-    ST7735_WriteData8(MADCTL_MY | MADCTL_MX | MADCTL_BGR);
+    ST7735_WriteData8(MADCTL_BGR);
     // ── Colour mode: 16-bit RGB565 ──────────────────────────────────────────
     ST7735_WriteCmd(ST77_COLMOD);
     ST7735_WriteData8(0x05);   // 0x05 = 16bpp
