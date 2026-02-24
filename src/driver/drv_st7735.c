@@ -70,7 +70,9 @@ static uint8_t  g_txt_scale = ST7735_TEXT_SCALE_LARGE;
 #define SPI_DC_L()    HAL_PIN_SetOutputValue(g_pin_dc,  0)   // command
 #define SPI_RES_H()   HAL_PIN_SetOutputValue(g_pin_res, 1)
 #define SPI_RES_L()   HAL_PIN_SetOutputValue(g_pin_res, 0)
-extern void HAL_PWM_Start(int pin, float dutyCycle);
+// Use the Tuya HAL which is already included in the BK7231N build
+extern int tuya_hal_pwm_init(unsigned char pin, unsigned int period, unsigned int duty);
+extern int tuya_hal_pwm_start(unsigned char pin);
 
 #define SPI_BLK_H()   HAL_PIN_SetOutputValue(g_pin_blk, 1)
 #define SPI_BLK_L()   HAL_PIN_SetOutputValue(g_pin_blk, 0)
