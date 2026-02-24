@@ -7,52 +7,48 @@
  * ║  ST7735S — 0.96" 80×160 Color TFT Driver for OpenBK7231T / BK7231N        ║
  * ║  Target device : KWS-303WF  (FPC-JL096B005-01V0 display module)           ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
- * ║  INTERFACE: 4-wire Software SPI (bit-bang, no hardware SPI needed)        ║
+ * ║  INTERFACE: 4-wire Software SPI (bit-bang)                                 ║
  * ║                                                                            ║
- * ║  WIRING (KWS-303WF BK7231N CBU module):                                   ║
- * ║    TFT Pin   Label    CBU Physical   CBU GPIO   Function                   ║
- * ║       3      SDA/SDIN     2            P16      SPI MOSI                   ║
- * ║       4      SCL/SCLK     1            P14      SPI SCK                    ║
- * ║       5      RS/DC        20           P17      Data/Command               ║
- * ║       6      RES          19           P9       Hardware Reset             ║
- * ║       7      CS           21           P15      SPI Chip Select            ║
- * ║       8      GND          13           GND      Ground                     ║
- * ║      10      VDD          14           3V3      Logic Power                ║
- * ║      11      LEDK         12           P24      Backlight (HIGH=ON)        ║
- * ║      12      LEDA         14           3V3      Backlight power (51.2Ω)    ║
- * ║      13      GND          13           GND      Ground                     ║
- * ║                                                                            ║
- * ╠══════════════════════════════════════════════════════════════════════════════╣
- * ║  CONSOLE COMMANDS                                                          ║
- * ║                                                                            ║
- * ║  startDriver ST7735 14 16 9 17 15 24  — init (SCK SDA RES DC CS BLK)     ║
- * ║  st7735_clear                          — fill screen black                ║
- * ║  st7735_clear 0xF800                   — fill screen with colour          ║
- * ║  st7735_brightness 0|1                 — backlight off/on                 ║
- * ║  st7735_goto <col> <row>               — set text cursor                  ║
- * ║  st7735_print <text>                   — print string at cursor           ║
- * ║  st7735_color <fg> [bg]                — set text colours (RGB565 hex)    ║
- * ║  st7735_draw <x> <y> <w> <h> <colour> — filled rectangle                 ║
- * ║  st7735_update                         — redraw HT7017 energy screen      ║
- * ║  st7735_scale 1|2|3                    — set text scale                   ║
+ * ║  WIRING (CBU module GPIO numbers):                                         ║
+ * ║    TFT       CBU GPIO   Function                                           ║
+ * ║    SCL/SCLK   P14       SPI SCK                                            ║
+ * ║    SDA/SDIN   P16       SPI MOSI                                           ║
+ * ║    RES         P9       Hardware Reset (active LOW)                        ║
+ * ║    RS/DC       P17      Data=HIGH / Command=LOW                            ║
+ * ║    CS          P15      Chip Select (active LOW)                           ║
+ * ║    LEDK        P24      Backlight (HIGH=ON)                                ║
+ * ║    LEDA        3V3      Backlight power via 51.2Ω                          ║
+ * ║    VDD         3V3      Logic power                                        ║
+ * ║    GND         GND                                                         ║
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
- * ║  DISPLAY LAYOUT (portrait 80×160, mimics original KWS-303WF screen)      ║
+ * ║  startDriver ST7735 14 16 9 17 15 24                                       ║
+ * ║               SCK  SDA RES DC CS BLK                                       ║
  * ║                                                                            ║
- * ║   Row 0  ┌──────────────────┐  "ON" (green)                               ║
- * ║   Row 1  │  238.4 V         │  (red)    large                             ║
- * ║   Row 2  │    0.000 A       │  (yellow) large                             ║
- * ║   Row 3  │    0.0 W         │  (blue)   large                             ║
- * ║   Row 4  │  0.000kWh        │  (cyan)   small                             ║
- * ║   Row 5  │  PF 0.00         │  (red)    small                             ║
- * ║   Row 6  │  50.04Hz         │  (green)  small                             ║
- * ║   Row 7  │  0.0C            │  (red)    small                             ║
- * ║          └──────────────────┘                                              ║
+ * ║  CONSOLE COMMANDS:                                                         ║
+ * ║  st7735_clear [colour]          fill screen (default black)               ║
+ * ║  st7735_brightness 0|1          backlight off/on                          ║
+ * ║  st7735_goto <col> <row>        set text cursor                           ║
+ * ║  st7735_print <text>            print at cursor                           ║
+ * ║  st7735_color <fg> [bg]         RGB565 hex colours                        ║
+ * ║  st7735_draw <x> <y> <w> <h> <colour>  filled rect                       ║
+ * ║  st7735_update                  force immediate energy screen redraw      ║
+ * ║  st7735_scale 1|2|3             set console text scale                    ║
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
- * ║  BUILD RULES                                                               ║
- * ║    No channel.h  |  No powerMeasurementCalibration  |  No CFG_SetExtended ║
- * ║    Use HAL_PIN_Setup_Output / HAL_PIN_SetOutputValue for GPIO              ║
+ * ║  FLICKER-FREE LAYOUT  80×160px                                             ║
+ * ║                                                                            ║
+ * ║  Y=  0  [ON/OFF]  scale1          [xx.xxHz]  scale1                       ║
+ * ║  Y= 11  Voltage  xxxxx [V]        scale2  RED                              ║
+ * ║  Y= 40  Current  xxxxx [A]        scale2  YELLOW                          ║
+ * ║  Y= 69  Power    xxxxx [W]        scale2  BLUE                            ║
+ * ║  Y= 98  kWh: xxxxxxx              scale1  CYAN                            ║
+ * ║  Y=114  PF:  xxxx                 scale1  RED                             ║
+ * ║  Y=130  Tmp: xxxxx C              scale1  ORANGE                          ║
+ * ║  Y=146  (spare)                                                            ║
+ * ║                                                                            ║
+ * ║  Static labels drawn ONCE at init.                                         ║
+ * ║  Each update only redraws the changed numeric zone → zero flicker.        ║
  * ╚══════════════════════════════════════════════════════════════════════════════╝
  */
 
@@ -63,11 +59,11 @@
 #define ST7735_WIDTH        80
 #define ST7735_HEIGHT       160
 
-// ST7735S chip RAM is 132×162; visible 80×160 panel starts at these offsets
-#define ST7735_COL_OFFSET   26   // (132 - 80) / 2 = 26
+// ST7735S chip RAM = 132×162; visible 80×160 starts at these offsets
+#define ST7735_COL_OFFSET   26
 #define ST7735_ROW_OFFSET   1
 
-// ─── ST7735S command set ───────────────────────────────────────────────────────
+// ─── ST7735S command bytes ─────────────────────────────────────────────────────
 #define ST77_NOP        0x00
 #define ST77_SWRESET    0x01
 #define ST77_SLPOUT     0x11
@@ -95,14 +91,14 @@
 #define ST77_GMCTRN1    0xE1
 
 // ─── MADCTL bits ───────────────────────────────────────────────────────────────
-#define MADCTL_MY   0x80   // row address order
-#define MADCTL_MX   0x40   // column address order
-#define MADCTL_MV   0x20   // row/column exchange
-#define MADCTL_ML   0x10   // vertical refresh order
-#define MADCTL_BGR  0x08   // BGR colour order
-#define MADCTL_MH   0x04   // horizontal refresh order
+#define MADCTL_MY   0x80
+#define MADCTL_MX   0x40
+#define MADCTL_MV   0x20
+#define MADCTL_ML   0x10
+#define MADCTL_BGR  0x08
+#define MADCTL_MH   0x04
 
-// ─── RGB565 colour constants ───────────────────────────────────────────────────
+// ─── RGB565 colours ────────────────────────────────────────────────────────────
 #define ST7735_BLACK    0x0000
 #define ST7735_WHITE    0xFFFF
 #define ST7735_RED      0xF800
@@ -115,36 +111,35 @@
 #define ST7735_GREY     0x8410
 #define ST7735_DARKGREY 0x4208
 
-// ─── Font metrics ──────────────────────────────────────────────────────────────
-#define FONT_W      5    // glyph pixel width
-#define FONT_H      7    // glyph pixel height
-#define FONT_ADV    6    // horizontal advance per character (px)
-#define FONT_VADV   10   // vertical advance per row (px)
+// ─── Font metrics (5×7 glyph, 6px advance) ────────────────────────────────────
+#define FONT_W      5
+#define FONT_H      7
+#define FONT_ADV    6
+#define FONT_VADV   10
 
-// Text scale multipliers
+// ─── Text scale aliases ────────────────────────────────────────────────────────
 #define ST7735_TEXT_SCALE_LARGE  2
 #define ST7735_TEXT_SCALE_SMALL  1
 
-// ─── Default pin assignments (CBU GPIO numbers) ────────────────────────────────
-#define ST7735_DEFAULT_SCK   14   // CBU P14 — SPI SCK
-#define ST7735_DEFAULT_SDA   16   // CBU P16 — SPI MOSI
-#define ST7735_DEFAULT_RES   9    // CBU P9  — Reset
-#define ST7735_DEFAULT_DC    17   // CBU P17 — Data/Command
-#define ST7735_DEFAULT_CS    15   // CBU P15 — Chip Select
-#define ST7735_DEFAULT_BLK   24   // CBU P24 — Backlight (HIGH=ON)
+// ─── Default GPIO pin assignments ─────────────────────────────────────────────
+#define ST7735_DEFAULT_SCK   14   // CBU P14
+#define ST7735_DEFAULT_SDA   16   // CBU P16
+#define ST7735_DEFAULT_RES   9    // CBU P9
+#define ST7735_DEFAULT_DC    17   // CBU P17
+#define ST7735_DEFAULT_CS    15   // CBU P15
+#define ST7735_DEFAULT_BLK   24   // CBU P24
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 void ST7735_Init(void);
 void ST7735_RunEverySecond(void);
 void ST7735_AppendInformationToHTTPIndexPage(http_request_t *request);
 
-// Drawing primitives
 void ST7735_FillScreen(uint16_t colour);
 void ST7735_FillRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t colour);
 void ST7735_DrawChar(uint8_t x, uint8_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale);
 void ST7735_DrawString(uint8_t x, uint8_t y, const char *str, uint16_t fg, uint16_t bg, uint8_t scale);
 
-// Energy screen — called by HT7017 after measurements update
+// Flicker-free energy screen — only changed zones are redrawn
 void ST7735_DrawEnergyScreen(float v, float a, float w,
                               float kwh, float pf, float hz,
                               float temp_c, uint8_t relay_on);
