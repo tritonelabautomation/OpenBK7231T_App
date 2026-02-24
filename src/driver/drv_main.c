@@ -1738,7 +1738,6 @@ void DRV_AppendInformationToHTTPIndexPage(http_request_t* request, int bPreState
 		hprintf255(request, ", total: %i</h5>", g_numDrivers);
 	}
 }
-
 bool DRV_IsMeasuringPower() {
 #ifndef OBK_DISABLE_ALL_DRIVERS
 	return DRV_IsRunning("BL0937") || DRV_IsRunning("BL0942")
