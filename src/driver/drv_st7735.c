@@ -347,80 +347,127 @@ static void DrawWiFiSymbol(uint8_t x, uint8_t y) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION F — FLICKER-FREE ENERGY SCREEN
+// SECTION F — FLICKER-FREE ENERGY SCREEN (EXACT KWS-303WF MATCH)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── Row Y positions & heights ─────────────────────────────────────────────────
-#define ROW_STATUS_Y   0
-#define ROW_STATUS_H   10
-#define ROW_V_Y        12
-#define ROW_V_H        26
-#define ROW_A_Y        38
-#define ROW_A_H        26
-#define ROW_W_Y        64
-#define ROW_W_H        26
-#define ROW_KWH_Y      90
-#define ROW_KWH_H      16
-#define ROW_PF_Y       106
-#define ROW_PF_H       16
-#define ROW_TEMP_Y     122
-#define ROW_TEMP_H     16
-// Y=146 → Y=160: spare (14px black)
+// --- Horizontal Layout Constants ---
+#define VAL_S           2                           // Scale for large numbers
+#define SML_S           1                           // Scale for small text
+#define LBL_W           (FONT_W * VAL_S)            // 10px wide ('V','A','W')
+#define LBL_X           (ST7735_WIDTH - LBL_W)      // 70px (Label start)
+#define VAL_ZONE_W      (LBL_X - 2)                 // 68px (Number clear zone)
 
-// ── Scale for each section ────────────────────────────────────────────────────
-// scale2: FONT_ADV*2=12px/char, FONT_H*2=14px tall
-// scale1: FONT_ADV*1= 6px/char, FONT_H*1= 7px tall
-#define VAL_S   2
-#define SML_S   1
+// --- Vertical Row positions (Matched to image_7a213a.jpg) ---
+#define ROW_STATUS_Y    0
+#define ROW_STATUS_H    10
+#define ROW_V_Y         12  // Blue Voltage
+#define ROW_V_H         26
+#define ROW_A_Y         38  // Red Current
+#define ROW_A_H         26
+#define ROW_W_Y         64  // Yellow Power
+#define ROW_W_H         26
+#define ROW_KWH_Y       90  // Cyan Energy
+#define ROW_KWH_H       16
+#define ROW_PF_Y        106 // Red Power Factor
+#define ROW_PF_H        16
+#define ROW_TEMP_Y      122 // Red Temperature
+#define ROW_TEMP_H      16
+#define ROW_IP_Y        142 // Bottom row IP
+#define ROW_IP_H        16
 
-// Large value zone: label char ("V"/"A"/"W") is 1 char × FONT_W*VAL_S = 10px
-// Value occupies x=0 to x=69 (70px), label at x=70
-#define LBL_W        (FONT_W  * VAL_S)          // 10px
-#define LBL_X        (ST7735_WIDTH - LBL_W)     // 70
-#define VAL_ZONE_W   LBL_X                       // 70px for value text
-
-// Small rows: "kWh:" / "PF: " / "Tmp:" = 4 chars × 6 = 24px label
-#define SML_LBL_W    (4 * FONT_ADV * SML_S)     // 24px
-#define SML_VAL_X    SML_LBL_W                   // 24
-#define SML_VAL_W    (ST7735_WIDTH - SML_LBL_W) // 56px
-
-// Clear a zone then draw new value — the core of flicker-free rendering
+// Helper: Clear specific zone and write new text
 static void UpdateZone(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
-                       const char *str, uint16_t fg, uint8_t scale)
+                        const char *str, uint16_t fg, uint8_t scale)
 {
     ST7735_FillRect(x, y, zw, zh, ST7735_BLACK);
-    uint8_t ty = y + (zh - FONT_H * scale) / 2;  // vertical centre
+    uint8_t ty = y + (zh - FONT_H * scale) / 2;
     ST7735_DrawString(x, ty, str, fg, ST7735_BLACK, scale);
 }
 
-// Draw labels, dividers — called ONCE at init, never again
+// Draw dividers and static labels once
 static void ST7735_DrawStaticFrame(void)
 {
-    // Horizontal dividers
-    ST7735_FillRect(0, ROW_STATUS_Y + ROW_STATUS_H, ST7735_WIDTH, 1, ST7735_DARKGREY);
-    ST7735_FillRect(0, ROW_V_Y      + ROW_V_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
-    ST7735_FillRect(0, ROW_A_Y      + ROW_A_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
-    ST7735_FillRect(0, ROW_W_Y      + ROW_W_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
+    // Grey Divider under status
+    ST7735_FillRect(0, 11, ST7735_WIDTH, 1, ST7735_DARKGREY);
 
-    // Unit labels — right edge of large rows
-    uint8_t vy = ROW_V_Y + (ROW_V_H - FONT_H * VAL_S) / 2;
-    uint8_t ay = ROW_A_Y + (ROW_A_H - FONT_H * VAL_S) / 2;
-    uint8_t wy = ROW_W_Y + (ROW_W_H - FONT_H * VAL_S) / 2;
-    ST7735_DrawChar(LBL_X, vy, 'V', ST7735_RED,    ST7735_BLACK, VAL_S);
-    ST7735_DrawChar(LBL_X, ay, 'A', ST7735_YELLOW, ST7735_BLACK, VAL_S);
-    ST7735_DrawChar(LBL_X, wy, 'W', ST7735_BLUE,   ST7735_BLACK, VAL_S);
+    // Large unit labels at far right
+    ST7735_DrawChar(LBL_X, ROW_V_Y + 7, 'V', ST7735_BLUE,   ST7735_BLACK, VAL_S);
+    ST7735_DrawChar(LBL_X, ROW_A_Y + 7, 'A', ST7735_RED,    ST7735_BLACK, VAL_S);
+    ST7735_DrawChar(LBL_X, ROW_W_Y + 7, 'W', ST7735_YELLOW, ST7735_BLACK, VAL_S);
 
-    // Prefix labels for small rows
-    uint8_t ky = ROW_KWH_Y  + (ROW_KWH_H  - FONT_H * SML_S) / 2;
-    uint8_t py = ROW_PF_Y   + (ROW_PF_H   - FONT_H * SML_S) / 2;
-    uint8_t ty = ROW_TEMP_Y + (ROW_TEMP_H - FONT_H * SML_S) / 2;
-    ST7735_DrawString(0, ky, "kWh:", ST7735_CYAN,   ST7735_BLACK, SML_S);
-    ST7735_DrawString(0, py, "PF: ", ST7735_RED,    ST7735_BLACK, SML_S);
-    ST7735_DrawString(0, ty, "Tmp:", ST7735_ORANGE, ST7735_BLACK, SML_S);
-    DrawWiFiSymbol(18, 1);                    // Static WiFi icon
-    ST7735_DrawString(2, 147, "IP:", ST7735_GREY, ST7735_BLACK, 1);
+    // Small row labels
+    ST7735_DrawString(50, ROW_KWH_Y + 4, "Kwh", ST7735_CYAN,  ST7735_BLACK, SML_S);
+    ST7735_DrawString(26, ROW_PF_Y + 4,  "PF",  ST7735_RED,   ST7735_BLACK, SML_S);
+    ST7735_DrawString(2,  ROW_IP_Y + 4,  "IP:", ST7735_GREY,  ST7735_BLACK, SML_S);
+
+    DrawWiFiSymbol(18, 1); // Top WiFi icon
 }
 
+void ST7735_DrawEnergyScreen(float v, float a, float w, float kwh, float pf, 
+                             float hz, float temp_c, uint8_t relay_on)
+{
+    if (!g_initialized) return;
+    char buf[16];
+
+    // 1. Status Row: Green ON/OFF + Blue Hz
+    const char *on_str = relay_on ? "ON " : "OFF";
+    if (strcmp(on_str, g_prev_on) != 0) {
+        strncpy(g_prev_on, on_str, sizeof(g_prev_on)-1);
+        UpdateZone(0, ROW_STATUS_Y, 24, ROW_STATUS_H, on_str, ST7735_GREEN, SML_S);
+    }
+    
+    snprintf(buf, sizeof(buf), "%2.0fHz", hz);
+    if (strcmp(buf, g_prev_hz) != 0) {
+        strncpy(g_prev_hz, buf, sizeof(g_prev_hz)-1);
+        UpdateZone(45, ROW_STATUS_Y, 35, ROW_STATUS_H, buf, ST7735_BLUE, SML_S);
+    }
+
+    // 2. Large Values (Blue Voltage, Red Current, Yellow Power)
+    snprintf(buf, sizeof(buf), "%5.1f", v);
+    if (strcmp(buf, g_prev_v) != 0) {
+        strncpy(g_prev_v, buf, sizeof(g_prev_v)-1);
+        UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_BLUE, VAL_S);
+    }
+
+    snprintf(buf, sizeof(buf), "%5.3f", a);
+    if (strcmp(buf, g_prev_a) != 0) {
+        strncpy(g_prev_a, buf, sizeof(g_prev_a)-1);
+        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_RED, VAL_S);
+    }
+
+    snprintf(buf, sizeof(buf), "%5.1f", w);
+    if (strcmp(buf, g_prev_w) != 0) {
+        strncpy(g_prev_w, buf, sizeof(g_prev_w)-1);
+        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_YELLOW, VAL_S);
+    }
+
+    // 3. Small Values (Cyan kWh, Red PF, Red Temp)
+    snprintf(buf, sizeof(buf), "%07.3f", kwh);
+    if (strcmp(buf, g_prev_kwh) != 0) {
+        strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh)-1);
+        UpdateZone(0, ROW_KWH_Y, 48, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
+    }
+
+    snprintf(buf, sizeof(buf), "%4.2f", pf);
+    if (strcmp(buf, g_prev_pf) != 0) {
+        strncpy(g_prev_pf, buf, sizeof(g_prev_pf)-1);
+        UpdateZone(0, ROW_PF_Y, 25, ROW_PF_H, buf, ST7735_RED, SML_S);
+    }
+
+    snprintf(buf, sizeof(buf), "%2.0f C", temp_c);
+    if (strcmp(buf, g_prev_tc) != 0) {
+        strncpy(g_prev_tc, buf, sizeof(g_prev_tc)-1);
+        UpdateZone(55, ROW_TEMP_Y, 25, ROW_TEMP_H, buf, ST7735_RED, SML_S);
+    }
+
+    // 4. IP Footer
+    extern char* WIFI_GetIP(void);
+    char *ip = WIFI_GetIP();
+    if (ip && strcmp(ip, g_prev_ip) != 0) {
+        strncpy(g_prev_ip, ip, sizeof(g_prev_ip)-1);
+        UpdateZone(22, ROW_IP_Y, 58, ROW_IP_H, ip, ST7735_WHITE, SML_S);
+    }
+}
 
 // Public energy screen update — FLICKER-FREE
 void ST7735_DrawEnergyScreen(float v, float a, float w, float kwh, float pf, 
