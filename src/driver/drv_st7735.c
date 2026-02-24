@@ -82,6 +82,10 @@ static char g_prev_pf[12]  = "";
 static char g_prev_hz[12]  = "";
 static char g_prev_tc[12]  = "";
 static char g_prev_on[4]   = "";
+#define ROW_IP_Y      146
+#define ROW_IP_H      14
+static char g_prev_ip[16] = "";
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION B — SOFTWARE SPI BIT-BANG
@@ -336,17 +340,17 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 // ── Row Y positions & heights ─────────────────────────────────────────────────
 #define ROW_STATUS_Y   0
 #define ROW_STATUS_H   10
-#define ROW_V_Y        11
-#define ROW_V_H        28
-#define ROW_A_Y        40
-#define ROW_A_H        28
-#define ROW_W_Y        69
-#define ROW_W_H        28
-#define ROW_KWH_Y      98
+#define ROW_V_Y        12
+#define ROW_V_H        26
+#define ROW_A_Y        38
+#define ROW_A_H        26
+#define ROW_W_Y        64
+#define ROW_W_H        26
+#define ROW_KWH_Y      90
 #define ROW_KWH_H      16
-#define ROW_PF_Y       114
+#define ROW_PF_Y       106
 #define ROW_PF_H       16
-#define ROW_TEMP_Y     130
+#define ROW_TEMP_Y     122
 #define ROW_TEMP_H     16
 // Y=146 → Y=160: spare (14px black)
 
@@ -400,79 +404,92 @@ static void ST7735_DrawStaticFrame(void)
     ST7735_DrawString(0, ky, "kWh:", ST7735_CYAN,   ST7735_BLACK, SML_S);
     ST7735_DrawString(0, py, "PF: ", ST7735_RED,    ST7735_BLACK, SML_S);
     ST7735_DrawString(0, ty, "Tmp:", ST7735_ORANGE, ST7735_BLACK, SML_S);
+    DrawWiFiSymbol(18, 1);                    // Static WiFi icon
+    ST7735_DrawString(2, 147, "IP:", ST7735_GREY, ST7735_BLACK, 1);
 }
 
+// Add WiFi function:
+static void DrawWiFiSymbol(uint8_t x, uint8_t y) {
+    ST7735_FillRect(x+0, y+6, 1, 2, ST7735_BLUE);
+    ST7735_FillRect(x+2, y+5, 1, 3, ST7735_BLUE);
+    ST7735_FillRect(x+4, y+3, 1, 5, ST7735_BLUE);
+    ST7735_FillRect(x+6, y+1, 1, 7, ST7735_BLUE);
+}
+
+
 // Public energy screen update — FLICKER-FREE
-void ST7735_DrawEnergyScreen(float v, float a, float w,
-                              float kwh, float pf, float hz,
-                              float temp_c, uint8_t relay_on)
+void ST7735_DrawEnergyScreen(float v, float a, float w, float kwh, float pf, 
+                           float hz, float temp_c, uint8_t relay_on)
 {
     if (!g_initialized) return;
     char buf[16];
 
-    // ── Status row: ON/OFF left, Hz right ─────────────────────────────────────
-    const char *on_str = relay_on ? "ON " : "OFF";
+    // Status row - ON/OFF + WiFi
+    const char *on_str = relay_on ? "ON " : "OFF ";
     if (strcmp(on_str, g_prev_on) != 0) {
-        strncpy(g_prev_on, on_str, sizeof(g_prev_on) - 1);
-        ST7735_FillRect(0, ROW_STATUS_Y, 20, ROW_STATUS_H, ST7735_BLACK);
-        ST7735_DrawString(0, ROW_STATUS_Y + 1, on_str,
-                          relay_on ? ST7735_GREEN : ST7735_GREY,
-                          ST7735_BLACK, SML_S);
+        strncpy(g_prev_on, on_str, sizeof(g_prev_on)-1);
+        ST7735_FillRect(0, ROW_STATUS_Y, 32, ROW_STATUS_H, ST7735_BLACK);
+        ST7735_DrawString(2, ROW_STATUS_Y+2, on_str,
+                         relay_on ? ST7735_GREEN : ST7735_GREY, 
+                         ST7735_BLACK, 1);
     }
 
-    snprintf(buf, sizeof(buf), "%5.2fHz", hz);
-    if (strcmp(buf, g_prev_hz) != 0) {
-        strncpy(g_prev_hz, buf, sizeof(g_prev_hz) - 1);
-        ST7735_FillRect(22, ROW_STATUS_Y, ST7735_WIDTH - 22, ROW_STATUS_H, ST7735_BLACK);
-        ST7735_DrawString(22, ROW_STATUS_Y + 1, buf,
-                          ST7735_GREEN, ST7735_BLACK, SML_S);
-    }
-
-    // ── Voltage — RED, scale2 ─────────────────────────────────────────────────
+    // VOLTAGE - scale2 RED
     snprintf(buf, sizeof(buf), "%5.1f", v);
     if (strcmp(buf, g_prev_v) != 0) {
-        strncpy(g_prev_v, buf, sizeof(g_prev_v) - 1);
+        strncpy(g_prev_v, buf, sizeof(g_prev_v)-1);
         UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, VAL_S);
     }
 
-    // ── Current — YELLOW, scale2 ──────────────────────────────────────────────
+    // CURRENT - scale2 YELLOW  
     snprintf(buf, sizeof(buf), "%5.3f", a);
     if (strcmp(buf, g_prev_a) != 0) {
-        strncpy(g_prev_a, buf, sizeof(g_prev_a) - 1);
+        strncpy(g_prev_a, buf, sizeof(g_prev_a)-1);
         UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_YELLOW, VAL_S);
     }
 
-    // ── Power — BLUE, scale2 ──────────────────────────────────────────────────
+    // POWER - scale2 BLUE
     snprintf(buf, sizeof(buf), "%5.1f", w);
     if (strcmp(buf, g_prev_w) != 0) {
-        strncpy(g_prev_w, buf, sizeof(g_prev_w) - 1);
+        strncpy(g_prev_w, buf, sizeof(g_prev_w)-1);
         UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_BLUE, VAL_S);
     }
 
-    // ── Energy kWh — CYAN, scale1 ─────────────────────────────────────────────
+    // KWH - scale1 CYAN
     snprintf(buf, sizeof(buf), "%7.3f", kwh);
     if (strcmp(buf, g_prev_kwh) != 0) {
-        strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh) - 1);
-        UpdateZone(SML_VAL_X, ROW_KWH_Y, SML_VAL_W, ROW_KWH_H,
-                   buf, ST7735_CYAN, SML_S);
+        strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh)-1);
+        UpdateZone(SML_VAL_X, ROW_KWH_Y, SML_VAL_W, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
     }
 
-    // ── Power Factor — RED, scale1 ────────────────────────────────────────────
+    // PF + HZ - split row
     snprintf(buf, sizeof(buf), "%4.2f", pf);
     if (strcmp(buf, g_prev_pf) != 0) {
-        strncpy(g_prev_pf, buf, sizeof(g_prev_pf) - 1);
-        UpdateZone(SML_VAL_X, ROW_PF_Y, SML_VAL_W, ROW_PF_H,
-                   buf, ST7735_RED, SML_S);
+        strncpy(g_prev_pf, buf, sizeof(g_prev_pf)-1);
+        UpdateZone(SML_VAL_X, ROW_PF_Y, 20, ROW_PF_H, buf, ST7735_RED, SML_S);
+    }
+    snprintf(buf, sizeof(buf), "%2d", (int)hz);
+    if (strcmp(buf, g_prev_hz) != 0) {
+        strncpy(g_prev_hz, buf, sizeof(g_prev_hz)-1);
+        UpdateZone(44, ROW_PF_Y, 16, ROW_PF_H, buf, ST7735_BLUE, SML_S);
     }
 
-    // ── Temperature — ORANGE, scale1 ──────────────────────────────────────────
+    // TEMP - scale1 ORANGE
     snprintf(buf, sizeof(buf), "%4.1fC", temp_c);
     if (strcmp(buf, g_prev_tc) != 0) {
-        strncpy(g_prev_tc, buf, sizeof(g_prev_tc) - 1);
-        UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H,
-                   buf, ST7735_ORANGE, SML_S);
+        strncpy(g_prev_tc, buf, sizeof(g_prev_tc)-1);
+        UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H, buf, ST7735_ORANGE, SML_S);
+    }
+
+    // IP ADDRESS - scale1 WHITE
+    extern char* WIFI_GetIP(void);
+    char *ip = WIFI_GetIP();
+    if (ip && strcmp(ip, g_prev_ip) != 0) {
+        strncpy(g_prev_ip, ip, sizeof(g_prev_ip)-1);
+        UpdateZone(18, ROW_IP_Y, 62, ROW_IP_H, ip, ST7735_WHITE, 1);
     }
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION G — CONSOLE COMMANDS
