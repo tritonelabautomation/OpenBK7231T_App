@@ -408,6 +408,7 @@ static void ST7735_DrawStaticFrame(void)
     ST7735_DrawString(0, ROW_IP_Y + 2, "IP:", ST7735_WHITE, ST7735_BLACK, SML_S);
 }
 
+static char* GetCurrentIP(void);
 
 // Public energy screen update — FLICKER-FREE
 void ST7735_DrawEnergyScreen(float v, float a, float w,
@@ -652,7 +653,6 @@ void ST7735_Init(void)
 
 // ─── Auto-refresh every 2 seconds ────────────────────────────────────────────
 static uint8_t g_refresh_counter = 0;
-
 
 // Get current IP (same method OpenBeken uses)
 static void GetCurrentIP(char *buf, int bufsz) {
