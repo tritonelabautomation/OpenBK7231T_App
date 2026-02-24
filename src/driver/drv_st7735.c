@@ -189,7 +189,7 @@ static void ST7735_InitController(void)
 
     ST7735_WriteCmd(ST77_INVOFF);   // black background correct on this panel
 
-    ST7735_WriteCmd(ST77_MADCTL);   ST7735_WriteData8(MADCTL_BGR);
+    ST7735_WriteCmd(ST77_MADCTL);   ST7735_WriteData8(0x08);
     ST7735_WriteCmd(ST77_COLMOD);   ST7735_WriteData8(0x05); ST7735_Delay(10);
 
     ST7735_WriteCmd(ST77_CASET);
@@ -484,8 +484,9 @@ static commandResult_t CMD_ST7735_Clear(const void *ctx, const char *cmd,
     uint16_t colour = ST7735_BLACK;
     if (args && *args) colour = (uint16_t)strtol(args, NULL, 0);
     // Invalidate cache so next DrawEnergyScreen redraws all values
-    g_prev_v[0]=g_prev_a[0]=g_prev_w[0]=g_prev_kwh[0]='\0';
-    g_prev_pf[0]=g_prev_hz[0]=g_prev_tc[0]=g_prev_on[0]='\0';
+    //g_prev_v[0]=g_prev_a[0]=g_prev_w[0]=g_prev_kwh[0]='\0';
+    //g_prev_pf[0]=g_prev_hz[0]=g_prev_tc[0]=g_prev_on[0]='\0';
+    g_prev_v[0]=g_prev_a[0]=g_prev_w[0]=g_prev_kwh[0]=g_prev_pf[0]=g_prev_hz[0]=g_prev_tc[0]=g_prev_on[0]='\0';
     ST7735_FillScreen(colour);
     if (colour == ST7735_BLACK) ST7735_DrawStaticFrame();
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: clear 0x%04X", colour);
