@@ -70,6 +70,8 @@ static uint8_t  g_txt_scale = ST7735_TEXT_SCALE_LARGE;
 #define SPI_DC_L()    HAL_PIN_SetOutputValue(g_pin_dc,  0)   // command
 #define SPI_RES_H()   HAL_PIN_SetOutputValue(g_pin_res, 1)
 #define SPI_RES_L()   HAL_PIN_SetOutputValue(g_pin_res, 0)
+extern void HAL_PWM_Start(int pin, float dutyCycle);
+
 #define SPI_BLK_H()   HAL_PIN_SetOutputValue(g_pin_blk, 1)
 #define SPI_BLK_L()   HAL_PIN_SetOutputValue(g_pin_blk, 0)
 
@@ -552,13 +554,25 @@ static commandResult_t CMD_ST7735_Clear(const void *ctx, const char *cmd,
 }
 
 static commandResult_t CMD_ST7735_Brightness(const void *ctx, const char *cmd,
-                                              const char *args, int flags)
+                                                const char *args, int flags)
 {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
-    int on = atoi(args);
-    if (on) { SPI_BLK_H(); } else { SPI_BLK_L(); }
+    
+    // MODIFIED FOR PWM: Now accepts 0-100 for dimming
+    int val = atoi(args); 
+    
+    if (val < 0) val = 0;
+    if (val > 100) val = 100;
+
+    // Logic: Inverted PWM. 
+    // If val is 100 (Max Brightness), we want pin LOW (0 duty)
+    // If val is 0 (Off), we want pin HIGH (100 duty)
+    float duty = 100.0f - (float)val; 
+    
+    HAL_PWM_Start(g_pin_blk, duty);
+
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: backlight %s", on ? "ON" : "OFF");
+              "ST7735: brightness set to %d%% (PWM Duty: %.1f)", val, duty);
     return CMD_RES_OK;
 }
 
@@ -669,8 +683,10 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_res);
     HAL_PIN_Setup_Output(g_pin_dc);
     HAL_PIN_Setup_Output(g_pin_cs);
+    
     HAL_PIN_Setup_Output(g_pin_blk);
-    SPI_BLK_L();   // LEDK LOW = backlight ON (inverted logic)
+    CMD_ExecuteCommand("st7735_brightness 100", 0); // Start at full brightness
+    //SPI_BLK_L();   // LEDK LOW = backlight ON (inverted logic)
 
     // Safe initial states
     SPI_CS_H();
