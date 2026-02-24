@@ -40,6 +40,7 @@ typedef struct driver_s {
 void TuyaMCU_RunEverySecond();
 void GirierMCU_RunEverySecond();
 extern void ST7735_Init();
+extern void ST7735_RunEverySecond();
 
 // startDriver BL0937
 static driver_t g_drivers[] = {
