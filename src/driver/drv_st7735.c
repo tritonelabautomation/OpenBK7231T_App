@@ -592,7 +592,7 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_cs);  HAL_PIN_Setup_Output(g_pin_blk);
 
     SPI_CS_H(); SPI_SCK_L(); SPI_SDA_L(); SPI_DC_H();
-    SPI_BLK_H();   // backlight ON
+    SPI_BLK_L();   // backlight ON
 
     ST7735_HardReset();
     ST7735_InitController();
