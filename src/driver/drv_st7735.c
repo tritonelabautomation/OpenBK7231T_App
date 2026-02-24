@@ -191,17 +191,19 @@ static void ST7735_InitController(void)
     ST7735_WriteData8(0x07);
 
     // ── Power control ───────────────────────────────────────────────────────
+    // ── Power control 1 ───────────────────────────────────────────────────────
     ST7735_WriteCmd(ST77_PWCTR1);
-    ST7735_WriteData8(0xA2);
+    ST7735_WriteData8(0xA2); // Increased drive voltage
     ST7735_WriteData8(0x02);
     ST7735_WriteData8(0x84);
 
+    // ── Power control 2 ───────────────────────────────────────────────────────
     ST7735_WriteCmd(ST77_PWCTR2);
-    ST7735_WriteData8(0xC5);
+    ST7735_WriteData8(0xC5); // Max internal boost for brightness
 
-    ST7735_WriteCmd(ST77_PWCTR3);
-    ST7735_WriteData8(0x0A);
-    ST7735_WriteData8(0x00);
+    // ── VCOM control ──────────────────────────────────────────────────────────
+    ST7735_WriteCmd(ST77_VMCTR1);
+    ST7735_WriteData8(0x3F); // Sharper contrast and true black depth
 
     ST7735_WriteCmd(ST77_PWCTR4);
     ST7735_WriteData8(0x8A);
