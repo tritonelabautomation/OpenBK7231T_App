@@ -348,6 +348,8 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define ROW_PF_H       16
 #define ROW_TEMP_Y     130
 #define ROW_TEMP_H     16
+#define ROW_IP_Y       146   // ← NEW: IP row
+#define ROW_IP_H       14    // ← NEW: Fits 80px width
 // Y=146 → Y=160: spare (14px black)
 
 // ── Scale for each section ────────────────────────────────────────────────────
@@ -410,7 +412,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     if (!g_initialized) return;
     char buf[16];
 
-    // ── Status row: ON/OFF left, Hz right ─────────────────────────────────────
+    // [ON 📶50Hz]  ← GREEN | BLUE
     const char *on_str = relay_on ? "ON " : "OFF";
     if (strcmp(on_str, g_prev_on) != 0) {
         strncpy(g_prev_on, on_str, sizeof(g_prev_on) - 1);
@@ -420,58 +422,66 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
                           ST7735_BLACK, SML_S);
     }
 
-    snprintf(buf, sizeof(buf), "%5.2fHz", hz);
+    snprintf(buf, sizeof(buf), "%5.1fHz", hz);
     if (strcmp(buf, g_prev_hz) != 0) {
         strncpy(g_prev_hz, buf, sizeof(g_prev_hz) - 1);
         ST7735_FillRect(22, ROW_STATUS_Y, ST7735_WIDTH - 22, ROW_STATUS_H, ST7735_BLACK);
         ST7735_DrawString(22, ROW_STATUS_Y + 1, buf,
-                          ST7735_GREEN, ST7735_BLACK, SML_S);
+                          ST7735_BLUE, ST7735_BLACK, SML_S);  // BLUE ✓
     }
 
-    // ── Voltage — RED, scale2 ─────────────────────────────────────────────────
+    // 230.0     V     ← RED scale2
     snprintf(buf, sizeof(buf), "%5.1f", v);
     if (strcmp(buf, g_prev_v) != 0) {
         strncpy(g_prev_v, buf, sizeof(g_prev_v) - 1);
         UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, VAL_S);
     }
 
-    // ── Current — YELLOW, scale2 ──────────────────────────────────────────────
+    // 0.250     A     ← YELLOW scale2  
     snprintf(buf, sizeof(buf), "%5.3f", a);
     if (strcmp(buf, g_prev_a) != 0) {
         strncpy(g_prev_a, buf, sizeof(g_prev_a) - 1);
         UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_YELLOW, VAL_S);
     }
 
-    // ── Power — BLUE, scale2 ──────────────────────────────────────────────────
+    // 57.5      W     ← BLUE scale2
     snprintf(buf, sizeof(buf), "%5.1f", w);
     if (strcmp(buf, g_prev_w) != 0) {
         strncpy(g_prev_w, buf, sizeof(g_prev_w) - 1);
         UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_BLUE, VAL_S);
     }
 
-    // ── Energy kWh — CYAN, scale1 ─────────────────────────────────────────────
-    snprintf(buf, sizeof(buf), "%7.3f", kwh);
+    // kWh:0.001       ← CYAN scale1
+    snprintf(buf, sizeof(buf), "%6.3f", kwh);
     if (strcmp(buf, g_prev_kwh) != 0) {
         strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh) - 1);
-        UpdateZone(SML_VAL_X, ROW_KWH_Y, SML_VAL_W, ROW_KWH_H,
-                   buf, ST7735_CYAN, SML_S);
+        UpdateZone(SML_VAL_X, ROW_KWH_Y, SML_VAL_W, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
     }
 
-    // ── Power Factor — RED, scale1 ────────────────────────────────────────────
+    // PF:0.99         ← RED scale1
     snprintf(buf, sizeof(buf), "%4.2f", pf);
     if (strcmp(buf, g_prev_pf) != 0) {
         strncpy(g_prev_pf, buf, sizeof(g_prev_pf) - 1);
-        UpdateZone(SML_VAL_X, ROW_PF_Y, SML_VAL_W, ROW_PF_H,
-                   buf, ST7735_RED, SML_S);
+        UpdateZone(SML_VAL_X, ROW_PF_Y, SML_VAL_W, ROW_PF_H, buf, ST7735_RED, SML_S);
     }
 
-    // ── Temperature — ORANGE, scale1 ──────────────────────────────────────────
+    // Tmp:32.0C       ← ORANGE scale1
     snprintf(buf, sizeof(buf), "%4.1fC", temp_c);
     if (strcmp(buf, g_prev_tc) != 0) {
         strncpy(g_prev_tc, buf, sizeof(g_prev_tc) - 1);
-        UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H,
-                   buf, ST7735_ORANGE, SML_S);
+        UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H, buf, ST7735_ORANGE, SML_S);
     }
+
+    // IP:192.168.1.x  ← WHITE scale1  ← NEW ROW
+/*    char ipbuf[16];
+    GetCurrentIP(ipbuf, sizeof(ipbuf));
+    if (strcmp(ipbuf, g_prev_ip) != 0) {
+        strncpy(g_prev_ip, ipbuf, sizeof(g_prev_ip) - 1);
+        ST7735_FillRect(0, ROW_IP_Y, ST7735_WIDTH, ROW_IP_H, ST7735_BLACK);
+        ST7735_DrawString(0, ROW_IP_Y + 2, "IP:", ST7735_WHITE, ST7735_BLACK, SML_S);
+        ST7735_DrawString(SML_VAL_X, ROW_IP_Y + 2, ipbuf, ST7735_WHITE, ST7735_BLACK, SML_S);
+    }
+   */ 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
