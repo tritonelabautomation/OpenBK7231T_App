@@ -436,6 +436,7 @@ static void UpdateZone(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
 // Static elements drawn ONCE at init — never touched again during updates
 static void ST7735_DrawStaticFrame(void)
 {
+    /*
     // Dividers
     ST7735_FillRect(0, ROW_STATUS_Y + ROW_STATUS_H, ST7735_WIDTH, 1, ST7735_DARKGREY);
     ST7735_FillRect(0, ROW_V_Y      + ROW_V_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
@@ -444,7 +445,8 @@ static void ST7735_DrawStaticFrame(void)
     // No divider between kWh (Y=98) and Timer (Y=113) — seamless pair
     ST7735_FillRect(0, ROW_TMR_Y  + ROW_TMR_H,    ST7735_WIDTH, 1, ST7735_DARKGREY);
     ST7735_FillRect(0, ROW_PFHZ_Y + ROW_PFHZ_H,  ST7735_WIDTH, 1, ST7735_DARKGREY);
-
+    */
+    
     // Unit label characters at right edge of large rows (vertically centred)
     // These are drawn once and never cleared — value zone stops at LBL_X=70
     uint8_t vy = ROW_V_Y + (ROW_V_H - FONT_H * VAL_S) / 2;   // 11+7=18
