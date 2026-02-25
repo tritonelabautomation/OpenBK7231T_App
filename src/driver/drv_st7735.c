@@ -395,7 +395,7 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 extern uint16_t HAL_ADC_GetValue(uint8_t channel);
 extern void     HAL_PIN_Setup_Input_Analog(int pin);
 
-static void ST7735_InitADC(void)
+static void (void)
 {
     HAL_PIN_Setup_Input_Analog(23);   // configure P23 as analogue input
 }
@@ -568,7 +568,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     // ── TEMPERATURE: "00.00C"  ADC ch23 / pin P23  (ORANGE, scale1) ──────────
     // Live read every refresh — temp_c_unused argument is ignored.
     // %05.2f → "00.00" (always 5 chars) + "C" = 6ch×6=36px ✓
-    {
+  /*  {
         float tc = ST7735_ReadTempC();
         snprintf(buf, sizeof(buf), "%05.2fC", tc);
         if (strcmp(buf, g_prev_tc) != 0) {
@@ -576,7 +576,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
             UpdateZone(0, ROW_TEMP_Y, SML_FULL_W, ROW_TEMP_H,
                        buf, ST7735_ORANGE, SML_S);
         }
-    }
+    } */
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -730,7 +730,7 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_cs);
     HAL_PIN_Setup_Output(g_pin_blk);
 
-    ST7735_InitADC();   // P23 → analogue input for NTC thermistor
+//    ();   // P23 → analogue input for NTC thermistor
 
     SPI_CS_H(); SPI_SCK_L(); SPI_SDA_L(); SPI_DC_H(); SPI_RES_H();
     SPI_BLK_L();   // backlight ON (active-low on KWS-303WF)
