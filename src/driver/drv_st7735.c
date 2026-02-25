@@ -461,7 +461,7 @@ static void ST7735_DrawStaticFrame(void)
 
 // ─── Public update — called every 2 s from RunEverySecond ────────────────────
 void ST7735_DrawEnergyScreen(float v, float a, float w,
-                              float kwh, float pf, float hz,
+                              float kwh, float pf, float Hz,
                               float temp_c_unused, uint8_t relay_on)
 {
     if (!g_initialized) return;
