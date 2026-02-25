@@ -64,6 +64,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include "rtos_pub.h"  // ← ADD THIS for os_feed_wdt()
 
 #ifndef LOG_FEATURE_ENERGY
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
@@ -253,7 +254,12 @@ void ST7735_FillRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t colour
     uint8_t hi = colour >> 8, lo = colour & 0xFF;
     uint32_t n = (uint32_t)w * h;
     SPI_CS_L(); SPI_DC_H();
-    while (n--) { SPI_WriteByte(hi); SPI_WriteByte(lo); }
+    uint32_t count = 0;  // ← ADD COUNTER
+    while (n--) { SPI_WriteByte(hi); SPI_WriteByte(lo); 
+           if (++count > 400) {  // ← FEED WDT
+                os_feed_wdt(); 
+                count = 0; 
+                }}
     SPI_CS_H();
 }
 
@@ -310,6 +316,7 @@ void ST7735_DrawChar(uint8_t x, uint8_t y, char c,
     SPI_CS_L(); SPI_DC_H();
     uint8_t row, s, col, t;
     for (row = 0; row < FONT_H; row++) {
+        os_feed_wdt();  // ← ADD THIS LINE
         for (s = 0; s < scale; s++) {
             for (col = 0; col < FONT_W; col++) {
                 uint16_t colour = ((gl[col] >> row) & 1) ? fg : bg;
