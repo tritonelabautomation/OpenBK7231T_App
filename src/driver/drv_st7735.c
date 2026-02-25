@@ -728,7 +728,7 @@ static commandResult_t CMD_ST7735_Relay(const void *ctx, const char *cmd,
 
 static void FireRelay(uint8_t turn_on)
 {
-    extern int CHANNEL_Set(int index, int value, int reason);
+    //extern int CHANNEL_Set(int index, int value, int reason);
     if (turn_on) {
         CHANNEL_Set(RELAY_CH_ON,  1, 0);
         CHANNEL_Set(RELAY_CH_ON,  0, 0);
