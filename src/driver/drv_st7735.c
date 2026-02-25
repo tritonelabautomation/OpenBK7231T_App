@@ -11,30 +11,38 @@
  *
  * FLICKER-FREE UPDATE STRATEGY:
  *   - FillScreen(BLACK) called ONCE at init only — never during updates
- *   - Static labels ("V","A","W","kWh:","PF:","Tmp:") drawn ONCE at init
+ *   - Static labels drawn ONCE at init, never again
  *   - Each refresh ONLY clears + redraws the numeric value zone per row
  *   - String comparison skips redraw if value has not changed
  *   - Result: zero full-screen flash, smooth live updates
  *
- * DISPLAY LAYOUT  80×160px — full utilisation:
+ * DISPLAY LAYOUT  80×160px — matches KWS-303WF product photo exactly:
  *
- *   Y=  0  h=10   [ON/OFF]  scale1 left  |  [xx.xxHz]  scale1 right
+ *   Y=  0  h=10   [ON 📶]  GREEN left  |  [49Hz]  BLUE right
  *   Y= 10  h= 1   ── divider (darkgrey) ──────────────────────────
- *   Y= 11  h=28   Voltage   xxxxx  [V]   scale2  RED
- *   Y= 39  h= 1   ── divider ──────────────────────────────────────
- *   Y= 40  h=28   Current   xxxxx  [A]   scale2  YELLOW
- *   Y= 68  h= 1   ── divider ──────────────────────────────────────
- *   Y= 69  h=28   Power     xxxxx  [W]   scale2  BLUE
- *   Y= 97  h= 1   ── divider ──────────────────────────────────────
- *   Y= 98  h=16   kWh: xxxxxxx            scale1  CYAN
- *   Y=114  h=16   PF:  xxxx               scale1  RED
- *   Y=130  h=16   Tmp: xxxxx C            scale1  ORANGE
- *   Y=146  h=14   (spare black bar)
+ *   Y= 11  h=26   Voltage   xxx.x  [V]   scale2  RED
+ *   Y= 37  h= 1   ── divider ──────────────────────────────────────
+ *   Y= 38  h=26   Current   x.xxx  [A]   scale2  CYAN
+ *   Y= 64  h= 1   ── divider ──────────────────────────────────────
+ *   Y= 65  h=26   Power     xxx.x  [W]   scale2  YELLOW
+ *   Y= 91  h= 1   ── divider ──────────────────────────────────────
+ *   Y= 92  h=14   kWh: xxxxxxx            scale1  CYAN
+ *   Y=106  h=14   Tmr: hh:mm:ss           scale1  WHITE
+ *   Y=120  h= 1   ── divider ──────────────────────────────────────
+ *   Y=121  h=12   PF:  x.xx     Hz: xx.x  scale1  RED | BLUE  (split row)
+ *   Y=133  h= 1   ── divider ──────────────────────────────────────
+ *   Y=134  h=12   Tmp: xx.x C             scale1  RED
+ *   Y=146  h=14   (spare / IP row)
  *   Y=160  end
  *
- * Pixel maths (scale2 = FONT_ADV*2 = 12px/char, FONT_H*2 = 14px tall):
- *   "999.9" = 5 chars × 12px = 60px value + 10px unit label = 70px < 80px ✓
- *   Vertical: 14px text centred in 28px row → 7px top padding ✓
+ * Colors matched to product photo:
+ *   Voltage  → RED      (matches photo)
+ *   Current  → CYAN     (matches photo — NOT yellow as original code had)
+ *   Power    → YELLOW   (matches photo — NOT blue as original code had)
+ *   kWh      → CYAN
+ *   Timer    → WHITE
+ *   PF       → RED,  Hz → BLUE
+ *   Temp     → RED
  */
 
 #include "../obk_config.h"
@@ -82,6 +90,10 @@ static char g_prev_pf[12]  = "";
 static char g_prev_hz[12]  = "";
 static char g_prev_tc[12]  = "";
 static char g_prev_on[4]   = "";
+static char g_prev_tmr[12] = "";
+
+// Uptime counter incremented each second by ST7735_RunEverySecond
+static uint32_t g_uptime_seconds = 0;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION B — SOFTWARE SPI BIT-BANG
@@ -187,7 +199,7 @@ static void ST7735_InitController(void)
 
     ST7735_WriteCmd(ST77_VMCTR1);  ST7735_WriteData8(0x0E);
 
-    ST7735_WriteCmd(ST77_INVOFF);   // black background correct on this panel
+    ST7735_WriteCmd(ST77_INVOFF);
 
     ST7735_WriteCmd(ST77_MADCTL);   ST7735_WriteData8(MADCTL_BGR);
     ST7735_WriteCmd(ST77_COLMOD);   ST7735_WriteData8(0x05); ST7735_Delay(10);
@@ -334,23 +346,34 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Row Y positions & heights ─────────────────────────────────────────────────
-#define ROW_STATUS_Y   0
+// These match the product photo layout exactly.
+#define ROW_STATUS_Y    0
 #define ROW_STATUS_H   10
+
 #define ROW_V_Y        11
-#define ROW_V_H        28
-#define ROW_A_Y        40
-#define ROW_A_H        28
-#define ROW_W_Y        69
-#define ROW_W_H        28
-#define ROW_KWH_Y      98
-#define ROW_KWH_H      16
-#define ROW_PF_Y       114
-#define ROW_PF_H       16
-#define ROW_TEMP_Y     130
-#define ROW_TEMP_H     16
-#define ROW_IP_Y       146   // ← NEW: IP row
-#define ROW_IP_H       14    // ← NEW: Fits 80px width
-// Y=146 → Y=160: spare (14px black)
+#define ROW_V_H        26
+
+#define ROW_A_Y        38
+#define ROW_A_H        26
+
+#define ROW_W_Y        65
+#define ROW_W_H        26
+
+#define ROW_KWH_Y      92
+#define ROW_KWH_H      14
+
+#define ROW_TMR_Y     106    // Timer row: "000:00:33T" (uptime hh:mm:ss)
+#define ROW_TMR_H      14
+
+#define ROW_PFHZ_Y    121    // Split: "PF:x.xx" left | "Hz:xx.x" right
+#define ROW_PFHZ_H     12
+
+#define ROW_TEMP_Y    134    // Temperature
+#define ROW_TEMP_H     12
+
+#define ROW_IP_Y      146    // Spare / IP row
+#define ROW_IP_H       14
+// Y=160  end
 
 // ── Scale for each section ────────────────────────────────────────────────────
 // scale2: FONT_ADV*2=12px/char, FONT_H*2=14px tall
@@ -358,16 +381,29 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define VAL_S   2
 #define SML_S   1
 
-// Large value zone: label char ("V"/"A"/"W") is 1 char × FONT_W*VAL_S = 10px
+// Large value zone: unit label ("V"/"A"/"W") 1 char × FONT_W*VAL_S = 10px
 // Value occupies x=0 to x=69 (70px), label at x=70
-#define LBL_W        (FONT_W  * VAL_S)          // 10px
-#define LBL_X        (ST7735_WIDTH - LBL_W)     // 70
-#define VAL_ZONE_W   LBL_X                       // 70px for value text
+#define LBL_W        (FONT_W  * VAL_S)         // 10px
+#define LBL_X        (ST7735_WIDTH - LBL_W)    // 70
+#define VAL_ZONE_W   LBL_X                      // 70px for value text
 
-// Small rows: "kWh:" / "PF: " / "Tmp:" = 4 chars × 6 = 24px label
-#define SML_LBL_W    (4 * FONT_ADV * SML_S)     // 24px
-#define SML_VAL_X    SML_LBL_W                   // 24
-#define SML_VAL_W    (ST7735_WIDTH - SML_LBL_W) // 56px
+// Small rows: 4-char prefix = 4 × FONT_ADV × SML_S = 24px
+#define SML_LBL_W    (4 * FONT_ADV * SML_S)    // 24px
+#define SML_VAL_X    SML_LBL_W                  // 24
+#define SML_VAL_W    (ST7735_WIDTH - SML_LBL_W)// 56px
+
+// PF/Hz split row: PF on left half, Hz on right half
+// "PF: " = 4 chars × 6 = 24px label, value ~5 chars × 6 = 30px → left zone = 40px wide
+// "Hz: " starts at x=40
+#define PFHZ_SPLIT_X  40
+#define PF_LBL_W      (4 * FONT_ADV * SML_S)   // 24px "PF: "
+#define PF_VAL_X      PF_LBL_W                  // 24
+#define PF_VAL_W      (PFHZ_SPLIT_X - PF_VAL_X)// 16px for PF value (e.g. "0.99")
+#define HZ_LBL_X      PFHZ_SPLIT_X              // 40 — "Hz: "
+#define HZ_VAL_X      (HZ_LBL_X + 4 * FONT_ADV * SML_S) // 64
+#define HZ_VAL_W      (ST7735_WIDTH - HZ_VAL_X) // 16px for Hz value
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // Clear a zone then draw new value — the core of flicker-free rendering
 static void UpdateZone(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
@@ -381,27 +417,34 @@ static void UpdateZone(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
 // Draw labels, dividers — called ONCE at init, never again
 static void ST7735_DrawStaticFrame(void)
 {
-    // Horizontal dividers
+    // Horizontal dividers after each major section
     ST7735_FillRect(0, ROW_STATUS_Y + ROW_STATUS_H, ST7735_WIDTH, 1, ST7735_DARKGREY);
     ST7735_FillRect(0, ROW_V_Y      + ROW_V_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
     ST7735_FillRect(0, ROW_A_Y      + ROW_A_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
     ST7735_FillRect(0, ROW_W_Y      + ROW_W_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
+    ST7735_FillRect(0, ROW_TMR_Y    + ROW_TMR_H,    ST7735_WIDTH, 1, ST7735_DARKGREY);
+    ST7735_FillRect(0, ROW_PFHZ_Y   + ROW_PFHZ_H,  ST7735_WIDTH, 1, ST7735_DARKGREY);
 
-    // Unit labels — right edge of large rows
+    // Unit labels — right edge of large rows (drawn once, never cleared)
     uint8_t vy = ROW_V_Y + (ROW_V_H - FONT_H * VAL_S) / 2;
     uint8_t ay = ROW_A_Y + (ROW_A_H - FONT_H * VAL_S) / 2;
     uint8_t wy = ROW_W_Y + (ROW_W_H - FONT_H * VAL_S) / 2;
+    // Colors matched to product photo:
     ST7735_DrawChar(LBL_X, vy, 'V', ST7735_RED,    ST7735_BLACK, VAL_S);
-    ST7735_DrawChar(LBL_X, ay, 'A', ST7735_YELLOW, ST7735_BLACK, VAL_S);
-    ST7735_DrawChar(LBL_X, wy, 'W', ST7735_BLUE,   ST7735_BLACK, VAL_S);
+    ST7735_DrawChar(LBL_X, ay, 'A', ST7735_CYAN,   ST7735_BLACK, VAL_S);  // CYAN (not yellow)
+    ST7735_DrawChar(LBL_X, wy, 'W', ST7735_YELLOW, ST7735_BLACK, VAL_S);  // YELLOW (not blue)
 
     // Prefix labels for small rows
-    uint8_t ky = ROW_KWH_Y  + (ROW_KWH_H  - FONT_H * SML_S) / 2;
-    uint8_t py = ROW_PF_Y   + (ROW_PF_H   - FONT_H * SML_S) / 2;
-    uint8_t ty = ROW_TEMP_Y + (ROW_TEMP_H - FONT_H * SML_S) / 2;
-    ST7735_DrawString(0, ky, "kWh:", ST7735_CYAN,   ST7735_BLACK, SML_S);
-    ST7735_DrawString(0, py, "PF: ", ST7735_RED,    ST7735_BLACK, SML_S);
-    ST7735_DrawString(0, ty, "Tmp:", ST7735_ORANGE, ST7735_BLACK, SML_S);
+    uint8_t ky  = ROW_KWH_Y  + (ROW_KWH_H  - FONT_H * SML_S) / 2;
+    uint8_t tmy = ROW_TMR_Y  + (ROW_TMR_H  - FONT_H * SML_S) / 2;
+    uint8_t phy = ROW_PFHZ_Y + (ROW_PFHZ_H - FONT_H * SML_S) / 2;
+    uint8_t ty2 = ROW_TEMP_Y + (ROW_TEMP_H - FONT_H * SML_S) / 2;
+
+    ST7735_DrawString(0,        ky,  "kWh:", ST7735_CYAN,   ST7735_BLACK, SML_S);
+    ST7735_DrawString(0,        tmy, "Tmr:", ST7735_WHITE,  ST7735_BLACK, SML_S);
+    ST7735_DrawString(0,        phy, "PF: ", ST7735_RED,    ST7735_BLACK, SML_S);
+    ST7735_DrawString(HZ_LBL_X, phy, "Hz: ", ST7735_BLUE,   ST7735_BLACK, SML_S);
+    ST7735_DrawString(0,        ty2, "Tmp:", ST7735_RED,    ST7735_BLACK, SML_S);
 }
 
 // Public energy screen update — FLICKER-FREE
@@ -412,76 +455,95 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     if (!g_initialized) return;
     char buf[16];
 
-    // [ON 📶50Hz]  ← GREEN | BLUE
+    // ── Status row: [ON] left (GREEN/GREY) | [49Hz] right (BLUE) ──────────────
     const char *on_str = relay_on ? "ON " : "OFF";
     if (strcmp(on_str, g_prev_on) != 0) {
         strncpy(g_prev_on, on_str, sizeof(g_prev_on) - 1);
-        ST7735_FillRect(0, ROW_STATUS_Y, 20, ROW_STATUS_H, ST7735_BLACK);
+        ST7735_FillRect(0, ROW_STATUS_Y, 22, ROW_STATUS_H, ST7735_BLACK);
         ST7735_DrawString(0, ROW_STATUS_Y + 1, on_str,
                           relay_on ? ST7735_GREEN : ST7735_GREY,
                           ST7735_BLACK, SML_S);
     }
 
-    snprintf(buf, sizeof(buf), "%5.1fHz", hz);
+    snprintf(buf, sizeof(buf), "%4.1fHz", hz);
     if (strcmp(buf, g_prev_hz) != 0) {
         strncpy(g_prev_hz, buf, sizeof(g_prev_hz) - 1);
-        ST7735_FillRect(22, ROW_STATUS_Y, ST7735_WIDTH - 22, ROW_STATUS_H, ST7735_BLACK);
-        ST7735_DrawString(22, ROW_STATUS_Y + 1, buf,
-                          ST7735_BLUE, ST7735_BLACK, SML_S);  // BLUE ✓
+        ST7735_FillRect(24, ROW_STATUS_Y, ST7735_WIDTH - 24, ROW_STATUS_H, ST7735_BLACK);
+        ST7735_DrawString(24, ROW_STATUS_Y + 1, buf, ST7735_BLUE, ST7735_BLACK, SML_S);
     }
 
-    // 230.0     V     ← RED scale2
+    // ── Voltage: xxx.x V  (RED, scale2) ───────────────────────────────────────
     snprintf(buf, sizeof(buf), "%5.1f", v);
     if (strcmp(buf, g_prev_v) != 0) {
         strncpy(g_prev_v, buf, sizeof(g_prev_v) - 1);
         UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, VAL_S);
     }
 
-    // 0.250     A     ← YELLOW scale2  
+    // ── Current: x.xxx A  (CYAN, scale2) ──────────────────────────────────────
     snprintf(buf, sizeof(buf), "%5.3f", a);
     if (strcmp(buf, g_prev_a) != 0) {
         strncpy(g_prev_a, buf, sizeof(g_prev_a) - 1);
-        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_YELLOW, VAL_S);
+        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_CYAN, VAL_S);
     }
 
-    // 57.5      W     ← BLUE scale2
+    // ── Power: xxx.x W  (YELLOW, scale2) ──────────────────────────────────────
     snprintf(buf, sizeof(buf), "%5.1f", w);
     if (strcmp(buf, g_prev_w) != 0) {
         strncpy(g_prev_w, buf, sizeof(g_prev_w) - 1);
-        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_BLUE, VAL_S);
+        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_YELLOW, VAL_S);
     }
 
-    // kWh:0.001       ← CYAN scale1
+    // ── kWh: 000.000  (CYAN, scale1) ──────────────────────────────────────────
     snprintf(buf, sizeof(buf), "%6.3f", kwh);
     if (strcmp(buf, g_prev_kwh) != 0) {
         strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh) - 1);
         UpdateZone(SML_VAL_X, ROW_KWH_Y, SML_VAL_W, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
     }
 
-    // PF:0.99         ← RED scale1
+    // ── Timer: hh:mm:ss  (WHITE, scale1) ──────────────────────────────────────
+    {
+        uint32_t s_tot = g_uptime_seconds;
+        uint32_t hh    = s_tot / 3600;
+        uint32_t mm    = (s_tot % 3600) / 60;
+        uint32_t ss    = s_tot % 60;
+        snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", (unsigned long)hh,
+                 (unsigned long)mm, (unsigned long)ss);
+        if (strcmp(buf, g_prev_tmr) != 0) {
+            strncpy(g_prev_tmr, buf, sizeof(g_prev_tmr) - 1);
+            UpdateZone(SML_VAL_X, ROW_TMR_Y, SML_VAL_W, ROW_TMR_H,
+                       buf, ST7735_WHITE, SML_S);
+        }
+    }
+
+    // ── PF + Hz split row ──────────────────────────────────────────────────────
+    // PF: x.xx  (RED, left half)
     snprintf(buf, sizeof(buf), "%4.2f", pf);
     if (strcmp(buf, g_prev_pf) != 0) {
         strncpy(g_prev_pf, buf, sizeof(g_prev_pf) - 1);
-        UpdateZone(SML_VAL_X, ROW_PF_Y, SML_VAL_W, ROW_PF_H, buf, ST7735_RED, SML_S);
+        // Clear only PF value zone (left of split)
+        ST7735_FillRect(PF_VAL_X, ROW_PFHZ_Y, PFHZ_SPLIT_X - PF_VAL_X, ROW_PFHZ_H, ST7735_BLACK);
+        uint8_t ty = ROW_PFHZ_Y + (ROW_PFHZ_H - FONT_H * SML_S) / 2;
+        ST7735_DrawString(PF_VAL_X, ty, buf, ST7735_RED, ST7735_BLACK, SML_S);
     }
 
-    // Tmp:32.0C       ← ORANGE scale1
+    // Hz: xx.x  (BLUE, right half) — reuse g_prev_hz already updated above
+    // We display Hz again in the split row for the product-photo look.
+    // Use a separate small buffer — we already wrote it in the status row.
+    snprintf(buf, sizeof(buf), "%4.1f", hz);
+    {
+        // Always draw Hz value in split row alongside PF
+        // (We track changes via g_prev_hz which was already updated above)
+        ST7735_FillRect(HZ_VAL_X, ROW_PFHZ_Y, HZ_VAL_W, ROW_PFHZ_H, ST7735_BLACK);
+        uint8_t ty = ROW_PFHZ_Y + (ROW_PFHZ_H - FONT_H * SML_S) / 2;
+        ST7735_DrawString(HZ_VAL_X, ty, buf, ST7735_BLUE, ST7735_BLACK, SML_S);
+    }
+
+    // ── Temperature: xx.x C  (RED, scale1) ────────────────────────────────────
     snprintf(buf, sizeof(buf), "%4.1fC", temp_c);
     if (strcmp(buf, g_prev_tc) != 0) {
         strncpy(g_prev_tc, buf, sizeof(g_prev_tc) - 1);
-        UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H, buf, ST7735_ORANGE, SML_S);
+        UpdateZone(SML_VAL_X, ROW_TEMP_Y, SML_VAL_W, ROW_TEMP_H, buf, ST7735_RED, SML_S);
     }
-
-    // IP:192.168.1.x  ← WHITE scale1  ← NEW ROW
-/*    char ipbuf[16];
-    GetCurrentIP(ipbuf, sizeof(ipbuf));
-    if (strcmp(ipbuf, g_prev_ip) != 0) {
-        strncpy(g_prev_ip, ipbuf, sizeof(g_prev_ip) - 1);
-        ST7735_FillRect(0, ROW_IP_Y, ST7735_WIDTH, ROW_IP_H, ST7735_BLACK);
-        ST7735_DrawString(0, ROW_IP_Y + 2, "IP:", ST7735_WHITE, ST7735_BLACK, SML_S);
-        ST7735_DrawString(SML_VAL_X, ROW_IP_Y + 2, ipbuf, ST7735_WHITE, ST7735_BLACK, SML_S);
-    }
-   */ 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -494,8 +556,9 @@ static commandResult_t CMD_ST7735_Clear(const void *ctx, const char *cmd,
     uint16_t colour = ST7735_BLACK;
     if (args && *args) colour = (uint16_t)strtol(args, NULL, 0);
     // Invalidate cache so next DrawEnergyScreen redraws all values
-    g_prev_v[0]=g_prev_a[0]=g_prev_w[0]=g_prev_kwh[0]='\0';
-    g_prev_pf[0]=g_prev_hz[0]=g_prev_tc[0]=g_prev_on[0]='\0';
+    g_prev_v[0] = g_prev_a[0] = g_prev_w[0] = g_prev_kwh[0] = '\0';
+    g_prev_pf[0] = g_prev_hz[0] = g_prev_tc[0] = g_prev_on[0] = '\0';
+    g_prev_tmr[0] = '\0';
     ST7735_FillScreen(colour);
     if (colour == ST7735_BLACK) ST7735_DrawStaticFrame();
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: clear 0x%04X", colour);
@@ -547,9 +610,9 @@ static commandResult_t CMD_ST7735_Draw(const void *ctx, const char *cmd,
                                         const char *args, int flags)
 {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
-    int x=0,y=0,w=0,h=0; uint32_t colour=0;
+    int x = 0, y = 0, w = 0, h = 0; uint32_t colour = 0;
     sscanf(args, "%d %d %d %d %u", &x, &y, &w, &h, &colour);
-    ST7735_FillRect((uint8_t)x,(uint8_t)y,(uint8_t)w,(uint8_t)h,(uint16_t)colour);
+    ST7735_FillRect((uint8_t)x, (uint8_t)y, (uint8_t)w, (uint8_t)h, (uint16_t)colour);
     return CMD_RES_OK;
 }
 
@@ -580,6 +643,16 @@ static commandResult_t CMD_ST7735_Scale(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
+// Reset uptime timer via console: st7735_resetTimer
+static commandResult_t CMD_ST7735_ResetTimer(const void *ctx, const char *cmd,
+                                              const char *args, int flags)
+{
+    g_uptime_seconds = 0;
+    g_prev_tmr[0]    = '\0';   // force redraw next tick
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: timer reset");
+    return CMD_RES_OK;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION H — INIT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -588,8 +661,6 @@ void ST7735_Init(void)
 {
     int argc = Tokenizer_GetArgsCount();
 
-    // Parse all 6 pin args if provided
-    // startDriver ST7735 <SCK> <SDA> <RES> <DC> <CS> <BLK>
     if (argc >= 2) g_pin_sck = Tokenizer_GetArgIntegerDefault(1, ST7735_DEFAULT_SCK);
     if (argc >= 3) g_pin_sda = Tokenizer_GetArgIntegerDefault(2, ST7735_DEFAULT_SDA);
     if (argc >= 4) g_pin_res = Tokenizer_GetArgIntegerDefault(3, ST7735_DEFAULT_RES);
@@ -601,7 +672,6 @@ void ST7735_Init(void)
               "ST7735: pins SCK=%d SDA=%d RES=%d DC=%d CS=%d BLK=%d",
               g_pin_sck, g_pin_sda, g_pin_res, g_pin_dc, g_pin_cs, g_pin_blk);
 
-    // Setup all GPIO as outputs FIRST
     HAL_PIN_Setup_Output(g_pin_sck);
     HAL_PIN_Setup_Output(g_pin_sda);
     HAL_PIN_Setup_Output(g_pin_res);
@@ -609,23 +679,19 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_cs);
     HAL_PIN_Setup_Output(g_pin_blk);
 
-    // Safe idle states
     SPI_CS_H();
     SPI_SCK_L();
     SPI_SDA_L();
     SPI_DC_H();
     SPI_RES_H();
 
-    // Backlight ON immediately — so we can see if panel powers up
-    SPI_BLK_L();
+    SPI_BLK_L();           // Backlight ON (active-low on this board)
     ST7735_Delay(50);
 
-    // Hardware reset + controller init
     ST7735_HardReset();
     ST7735_InitController();
     g_initialized = 1;
 
-    // ONE-TIME full clear + static frame — never repeated during updates
     ST7735_FillScreen(ST7735_BLACK);
     ST7735_DrawStaticFrame();
 
@@ -637,12 +703,10 @@ void ST7735_Init(void)
     CMD_RegisterCommand("st7735_draw",       CMD_ST7735_Draw,       NULL);
     CMD_RegisterCommand("st7735_update",     CMD_ST7735_Update,     NULL);
     CMD_RegisterCommand("st7735_scale",      CMD_ST7735_Scale,      NULL);
+    CMD_RegisterCommand("st7735_resetTimer", CMD_ST7735_ResetTimer, NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: init SCK=%d SDA=%d RES=%d DC=%d CS=%d BLK=%d",
-              g_pin_sck, g_pin_sda, g_pin_res, g_pin_dc, g_pin_cs, g_pin_blk);
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: 80x160 flicker-free col_off=%d row_off=%d",
+              "ST7735: init OK 80x160 col_off=%d row_off=%d",
               ST7735_COL_OFFSET, ST7735_ROW_OFFSET);
 }
 
@@ -652,6 +716,9 @@ static uint8_t g_refresh_counter = 0;
 void ST7735_RunEverySecond(void)
 {
     if (!g_initialized) return;
+
+    g_uptime_seconds++;     // increment uptime regardless of display refresh rate
+
     if (++g_refresh_counter < 2) return;
     g_refresh_counter = 0;
 
@@ -677,10 +744,12 @@ void ST7735_AppendInformationToHTTPIndexPage(http_request_t *request)
         "<tr><td>Status</td><td>%s</td></tr>"
         "<tr><td>Size</td><td>80x160 RGB565</td></tr>"
         "<tr><td>Pins</td><td>SCK=%d SDA=%d RES=%d DC=%d CS=%d BLK=%d</td></tr>"
+        "<tr><td>Uptime</td><td>%lu s</td></tr>"
         "<tr><td>Mode</td><td>Flicker-free (zone update)</td></tr>"
         "</table>",
         g_initialized ? "OK" : "NOT INIT",
-        g_pin_sck, g_pin_sda, g_pin_res, g_pin_dc, g_pin_cs, g_pin_blk);
+        g_pin_sck, g_pin_sda, g_pin_res, g_pin_dc, g_pin_cs, g_pin_blk,
+        (unsigned long)g_uptime_seconds);
     strncat(request->reply, tmp,
             sizeof(request->reply) - strlen(request->reply) - 1);
 }
