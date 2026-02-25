@@ -785,8 +785,10 @@ void ST7735_RunEverySecond(void)
         HT7017_GetPower(),
         HT7017_GetWh() / 1000.0f,
         HT7017_GetPowerFactor(),
-        HT7017_GetFrequency());
-        //0.0f               // ignored — temperature always read from ADC
+        HT7017_GetFrequency(),
+        0.0f,
+        0.0f);
+        // ignored — temperature always read from ADC
        // Relay_GetState());   // 1 = ON, 0 = OFF
 }
 
