@@ -494,7 +494,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
 
     // ── VOLTAGE: "00.0" + V label  (RED, scale2) ─────────────────────────────
     // %4.1f → " 0.0".."999.9", max 5ch×12=60px fits in 70px zone ✓
-    snprintf(buf, sizeof(buf), "%4.1f", v);
+    snprintf(buf, sizeof(buf), "%4.2f", v);
     if (strcmp(buf, g_prev_v) != 0) {
         strncpy(g_prev_v, buf, sizeof(g_prev_v) - 1);
         UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, VAL_S);
@@ -509,7 +509,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     }
 
     // ── POWER: "00.0" + W label  (YELLOW, scale2) ────────────────────────────
-    snprintf(buf, sizeof(buf), "%4.1f", w);
+    snprintf(buf, sizeof(buf), "%4.2f", w);
     if (strcmp(buf, g_prev_w) != 0) {
         strncpy(g_prev_w, buf, sizeof(g_prev_w) - 1);
         UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_YELLOW, VAL_S);
@@ -517,7 +517,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
 
     // ── kWh: "000.00KWh"  (CYAN, scale1, full 80px row) ─────────────────────
     // %06.2f → "000.00" (always 6 chars) + "KWh" = 9ch×6=54px ✓
-    snprintf(buf, sizeof(buf), "%06.2fKWh", kwh);
+    snprintf(buf, sizeof(buf), "%06.2fkWh", kwh);
     if (strcmp(buf, g_prev_kwh) != 0) {
         strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh) - 1);
         UpdateZone(0, ROW_KWH_Y, SML_FULL_W, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
@@ -557,7 +557,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
         }
 
         // Hz value: composite "XX.XHz" — change triggers right zone redraw
-        snprintf(buf, sizeof(buf), "%.1fHz", hz);
+        snprintf(buf, sizeof(buf), "%.2fHz", Hz);
         if (strcmp(buf, g_prev_hz) != 0) {
             strncpy(g_prev_hz, buf, sizeof(g_prev_hz) - 1);
             ST7735_FillRect(PFHZ_HZ_X, ROW_PFHZ_Y, PFHZ_HZ_W, ROW_PFHZ_H, ST7735_BLACK);
@@ -568,15 +568,16 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     // ── TEMPERATURE: "00.00C"  ADC ch23 / pin P23  (ORANGE, scale1) ──────────
     // Live read every refresh — temp_c_unused argument is ignored.
     // %05.2f → "00.00" (always 5 chars) + "C" = 6ch×6=36px ✓
-  /*  {
-        float tc = ST7735_ReadTempC();
+    {
+        //float tc = ST7735_ReadTempC();
+        float tc = 0.0;
         snprintf(buf, sizeof(buf), "%05.2fC", tc);
         if (strcmp(buf, g_prev_tc) != 0) {
             strncpy(g_prev_tc, buf, sizeof(g_prev_tc) - 1);
             UpdateZone(0, ROW_TEMP_Y, SML_FULL_W, ROW_TEMP_H,
                        buf, ST7735_ORANGE, SML_S);
         }
-    } */
+    } 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
