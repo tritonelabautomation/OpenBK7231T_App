@@ -391,7 +391,7 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION G — ADC TEMPERATURE  (pin P23 / channel 23)
 // ═══════════════════════════════════════════════════════════════════════════════
-
+/*
 extern uint16_t HAL_ADC_GetValue(uint8_t channel);
 extern void     HAL_PIN_Setup_Input_Analog(int pin);
 
@@ -419,7 +419,7 @@ static float ST7735_ReadTempC(void)
     float temp_k = 1.0f / (1.0f / NTC_T0_K + logf(rntc / NTC_R25) / NTC_B);
     return temp_k - 273.15f;
 }
-
+*/
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION H — FLICKER-FREE SCREEN DRAW
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -777,7 +777,7 @@ void ST7735_RunEverySecond(void)
     extern float HT7017_GetWh(void);
     extern float HT7017_GetPowerFactor(void);
     extern float HT7017_GetFrequency(void);
-    extern uint8_t Relay_GetState(void);   // replace with your actual relay getter
+   // extern uint8_t Relay_GetState(void);   // replace with your actual relay getter
 
     ST7735_DrawEnergyScreen(
         HT7017_GetVoltage(),
@@ -787,7 +787,7 @@ void ST7735_RunEverySecond(void)
         HT7017_GetPowerFactor(),
         HT7017_GetFrequency(),
         0.0f,                // ignored — temperature always read from ADC
-        Relay_GetState());   // 1 = ON, 0 = OFF
+       // Relay_GetState());   // 1 = ON, 0 = OFF
 }
 
 void ST7735_AppendInformationToHTTPIndexPage(http_request_t *request)
