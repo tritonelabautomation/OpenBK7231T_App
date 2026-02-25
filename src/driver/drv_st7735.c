@@ -461,7 +461,7 @@ static void ST7735_DrawStaticFrame(void)
 
 // ─── Public update — called every 2 s from RunEverySecond ────────────────────
 void ST7735_DrawEnergyScreen(float v, float a, float w,
-                              float kwh, float pf, float Hz,
+                              float kwh, float pf, float hz,
                               float temp_c_unused, uint8_t relay_on)
 {
     if (!g_initialized) return;
@@ -557,7 +557,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
         }
 
         // Hz value: composite "XX.XHz" — change triggers right zone redraw
-        snprintf(buf, sizeof(buf), "%.2fHz", Hz);
+        snprintf(buf, sizeof(buf), "%.2fHz", hz);
         if (strcmp(buf, g_prev_hz) != 0) {
             strncpy(g_prev_hz, buf, sizeof(g_prev_hz) - 1);
             ST7735_FillRect(PFHZ_HZ_X, ROW_PFHZ_Y, PFHZ_HZ_W, ROW_PFHZ_H, ST7735_BLACK);
