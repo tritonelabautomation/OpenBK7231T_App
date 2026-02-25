@@ -9,20 +9,14 @@
  * ┌─────────────────────────────────────────────────────┐
  * │  DISPLAY LAYOUT  80×160px — fully utilised          │
  * │                                                     │
- * │  Y=  0 h=10  ON      WiFi     ← GREEN|GREY  BLUE   │
- * │  ─── divider ──────────────────────────────────     │
- * │  Y= 11 h=28  00.0          V  ← RED   scale2       │
- * │  ─── divider ──────────────────────────────────     │
- * │  Y= 40 h=28  00.00         A  ← CYAN  scale2       │
- * │  ─── divider ──────────────────────────────────     │
- * │  Y= 69 h=28  00.0          W  ← YELLOW scale2      │
- * │  ─── divider ──────────────────────────────────     │
- * │  Y= 98 h=15  000.00KWh        ← CYAN  scale1       │
- * │  Y=113 h=15  00:00:00T        ← WHITE scale1       │
- * │  ─── divider ──────────────────────────────────     │
- * │  Y=129 h=15  0.00PF  50.0Hz   ← RED | BLUE scale1  │
- * │  ─── divider ──────────────────────────────────     │
- * │  Y=145 h=15  00.00C           ← ORANGE scale1      │
+ * │  Y=  0 h=10  ON      WiFi     ← GREEN|GREY  BLUE    │
+ * │  Y= 11 h=28  00.0          V  ← RED   scale2        │
+ * │  Y= 40 h=28  00.00         A  ← CYAN  scale2        │
+ * │  Y= 69 h=28  00.0          W  ← YELLOW scale2       │
+ * │  Y= 98 h=17  000.00KWh        ← CYAN  scale1        │
+ * │  Y=113 h=17  00:00:00T        ← WHITE scale1        │
+ * │  Y=129 h=17  0.00PF  50.0Hz   ← RED | BLUE scale1   │
+ * │  Y=145 h=17  00.00C           ← ORANGE scale1       │
  * └─────────────────────────────────────────────────────┘
  *
  * TOTAL = 10+1+28+1+28+1+28+1+15+15+1+15+1+15 = 160px EXACT
@@ -254,10 +248,7 @@ void ST7735_FillRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t colour
     uint8_t hi = colour >> 8, lo = colour & 0xFF;
     uint32_t n = (uint32_t)w * h;
     SPI_CS_L(); SPI_DC_H();
-    while (n--) { SPI_WriteByte(hi); SPI_WriteByte(lo); 
-           if (++count > 400) {  
-                count = 0; 
-                }}
+    while (n--) { SPI_WriteByte(hi); SPI_WriteByte(lo);}
     SPI_CS_H();
 }
 
