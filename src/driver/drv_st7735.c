@@ -43,6 +43,16 @@
  * FLICKER-FREE: dividers + V/A/W unit labels drawn once at init.
  *   Small rows draw full composite string (value+units) — no separate prefix.
  *   Per-field string cache skips SPI write when value unchanged.
+ *
+ * RELAY (latching, schematic-verified):
+ *   Ch8 → GPIO P7 = ON  coil (latch CLOSED)
+ *   Ch7 → GPIO P8 = OFF coil (latch OPEN)
+ *   State tracked in g_relay_state (latching = no readable output).
+ *
+ * BUTTONS (all active-low, internal pull-up, schematic-verified):
+ *   Btn1 P28 CBU-17 [ON/OFF] — toggles relay
+ *   Btn2 P26 CBU-11 [+]     — RESERVED (future brightness/threshold)
+ *   Btn3 P20 CBU-3  [−]     — RESERVED (future brightness/threshold)
  */
 
 #include "../obk_config.h"
@@ -58,7 +68,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
-
 
 #ifndef LOG_FEATURE_ENERGY
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
@@ -101,7 +110,7 @@ static uint32_t g_uptime_seconds = 0;
 
 // ─── ADC / NTC temperature config ────────────────────────────────────────────
 // Pin P23 / ADC channel 23 (ADC3 on BK7231N)
-#define ADC_TEMP_CHANNEL  23        // passed to HAL_ADC_GetValue()
+#define ADC_TEMP_CHANNEL  23        // passed to HAL_ADC_Read()
 #define ADC_MAX_VAL       4095.0f   // 12-bit; change to 1023.0f for 10-bit ADC
 #define NTC_R25           10000.0f  // NTC nominal Ω at 25 °C
 #define NTC_B             3950.0f   // NTC B-constant (K)
@@ -110,6 +119,23 @@ static uint32_t g_uptime_seconds = 0;
 // NTC_PULLUP 0 → Vcc→Rs→ADC_pin→NTC→GND  (most common, Rs is pull-up)
 // NTC_PULLUP 1 → Vcc→NTC→ADC_pin→Rs→GND  (NTC is pull-up)
 #define NTC_PULLUP        0
+
+// ─── Latching relay (schematic-verified) ─────────────────────────────────────
+// Ch8 → GPIO P7 = ON  coil  |  Ch7 → GPIO P8 = OFF coil
+#define RELAY_CH_ON    8
+#define RELAY_CH_OFF   7
+static uint8_t g_relay_state = 0;   // 0=OFF 1=ON — tracked internally
+
+// ─── Buttons (schematic-verified, all active-low) ─────────────────────────────
+// Btn1 P28 CBU-17 [ON/OFF]  Btn2 P26 CBU-11 [+]  Btn3 P20 CBU-3 [−]
+#define BUTTON1_PIN        28
+#define BUTTON2_PIN        26
+#define BUTTON3_PIN        20
+#define BTN_DEBOUNCE_TICKS  3
+
+static uint8_t g_btn1_last = 1, g_btn1_db = 0;
+static uint8_t g_btn2_last = 1, g_btn2_db = 0;
+static uint8_t g_btn3_last = 1, g_btn3_db = 0;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION B — SOFTWARE SPI BIT-BANG
@@ -386,21 +412,17 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION G — ADC TEMPERATURE  (pin P23 / channel 23)
 // ═══════════════════════════════════════════════════════════════════════════════
-/*
-extern uint16_t HAL_ADC_GetValue(uint8_t channel);
-extern void     HAL_PIN_Setup_Input_Analog(int pin);
+// HAL_ADC_Read() is the correct BK7231N function (hal_adc.h / hal_adc_bk7231n.c)
+// No pin setup call needed — BK7231N routes P23 to SADC mux internally.
 
-static void (void)
-{
-    HAL_PIN_Setup_Input_Analog(23);   // configure P23 as analogue input
-}
+extern uint32_t HAL_ADC_Read(uint8_t channel);
 
 static float ST7735_ReadTempC(void)
 {
-    uint16_t raw = HAL_ADC_GetValue(ADC_TEMP_CHANNEL);
+    uint32_t raw = HAL_ADC_Read(ADC_TEMP_CHANNEL);
 
-    if (raw == 0)                     return -99.0f;   // short / no sensor
-    if (raw >= (uint16_t)ADC_MAX_VAL) return 999.0f;   // open circuit
+    if (raw == 0)                      return -99.0f;   // short / no sensor
+    if (raw >= (uint32_t)ADC_MAX_VAL)  return 999.0f;   // open circuit
 
     float r = (float)raw;
 
@@ -414,7 +436,7 @@ static float ST7735_ReadTempC(void)
     float temp_k = 1.0f / (1.0f / NTC_T0_K + logf(rntc / NTC_R25) / NTC_B);
     return temp_k - 273.15f;
 }
-*/
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION H — FLICKER-FREE SCREEN DRAW
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -431,17 +453,6 @@ static void UpdateZone(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
 // Static elements drawn ONCE at init — never touched again during updates
 static void ST7735_DrawStaticFrame(void)
 {
-    /*
-    // Dividers
-    ST7735_FillRect(0, ROW_STATUS_Y + ROW_STATUS_H, ST7735_WIDTH, 1, ST7735_DARKGREY);
-    ST7735_FillRect(0, ROW_V_Y      + ROW_V_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
-    ST7735_FillRect(0, ROW_A_Y      + ROW_A_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
-    ST7735_FillRect(0, ROW_W_Y      + ROW_W_H,      ST7735_WIDTH, 1, ST7735_DARKGREY);
-    // No divider between kWh (Y=98) and Timer (Y=113) — seamless pair
-    ST7735_FillRect(0, ROW_TMR_Y  + ROW_TMR_H,    ST7735_WIDTH, 1, ST7735_DARKGREY);
-    ST7735_FillRect(0, ROW_PFHZ_Y + ROW_PFHZ_H,  ST7735_WIDTH, 1, ST7735_DARKGREY);
-    */
-    
     // Unit label characters at right edge of large rows (vertically centred)
     // These are drawn once and never cleared — value zone stops at LBL_X=70
     uint8_t vy = ROW_V_Y + (ROW_V_H - FONT_H * VAL_S) / 2;   // 11+7=18
@@ -490,7 +501,6 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     }
 
     // ── VOLTAGE: "00.0" + V label  (RED, scale2) ─────────────────────────────
-    // %4.1f → " 0.0".."999.9", max 5ch×12=60px fits in 70px zone ✓
     snprintf(buf, sizeof(buf), "%4.2f", v);
     if (strcmp(buf, g_prev_v) != 0) {
         strncpy(g_prev_v, buf, sizeof(g_prev_v) - 1);
@@ -498,7 +508,6 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     }
 
     // ── CURRENT: "00.00" + A label  (CYAN, scale2) ───────────────────────────
-    // %5.2f → " 0.00".."99.99", max 5ch×12=60px fits in 70px zone ✓
     snprintf(buf, sizeof(buf), "%5.2f", a);
     if (strcmp(buf, g_prev_a) != 0) {
         strncpy(g_prev_a, buf, sizeof(g_prev_a) - 1);
@@ -513,7 +522,6 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     }
 
     // ── kWh: "000.00KWh"  (CYAN, scale1, full 80px row) ─────────────────────
-    // %06.2f → "000.00" (always 6 chars) + "KWh" = 9ch×6=54px ✓
     snprintf(buf, sizeof(buf), "%06.2fkWh", kwh);
     if (strcmp(buf, g_prev_kwh) != 0) {
         strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh) - 1);
@@ -521,7 +529,6 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     }
 
     // ── TIMER: "00:00:00T"  (WHITE, scale1, full 80px row) ───────────────────
-    // 9ch×6=54px ✓
     {
         uint32_t s_tot = g_uptime_seconds;
         uint32_t hh    = s_tot / 3600;
@@ -537,15 +544,9 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     }
 
     // ── PF+Hz SPLIT ROW  (scale1) ─────────────────────────────────────────────
-    //
-    // Left half  x=0..37:   "0.00PF"  RED   → 6ch×6=36px, clear 38px
-    // Right half x=38..79:  "50.0Hz"  BLUE  → 6ch×6=36px, clear 42px
-    //
-    // Both zones have independent change detection.
     {
-        uint8_t phy = ROW_PFHZ_Y + (ROW_PFHZ_H - FONT_H * SML_S) / 2;  // +4
+        uint8_t phy = ROW_PFHZ_Y + (ROW_PFHZ_H - FONT_H * SML_S) / 2;
 
-        // PF value: composite "X.XXpF" — change triggers left zone redraw
         snprintf(buf, sizeof(buf), "%.2fPF", pf);
         if (strcmp(buf, g_prev_pf) != 0) {
             strncpy(g_prev_pf, buf, sizeof(g_prev_pf) - 1);
@@ -553,7 +554,6 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
             ST7735_DrawString(PFHZ_PF_X, phy, buf, ST7735_RED, ST7735_BLACK, SML_S);
         }
 
-        // Hz value: composite "XX.XHz" — change triggers right zone redraw
         snprintf(buf, sizeof(buf), "%.2fHz", hz);
         if (strcmp(buf, g_prev_hz) != 0) {
             strncpy(g_prev_hz, buf, sizeof(g_prev_hz) - 1);
@@ -562,23 +562,23 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
         }
     }
 
-    // ── TEMPERATURE: "00.00C"  ADC ch23 / pin P23  (ORANGE, scale1) ──────────
-    // Live read every refresh — temp_c_unused argument is ignored.
-    // %05.2f → "00.00" (always 5 chars) + "C" = 6ch×6=36px ✓
+    // ── TEMPERATURE: ADC ch23 / pin P23  (ORANGE, scale1) ────────────────────
+    // 0.5°C hysteresis — only redraws when reading moves ≥0.5°C from last drawn value
     {
-        //float tc = ST7735_ReadTempC();
-        float tc = 0.0;
-        snprintf(buf, sizeof(buf), "%05.2fC", tc);
-        if (strcmp(buf, g_prev_tc) != 0) {
+        static float s_last_tc = -999.0f;
+        float tc = ST7735_ReadTempC();
+        if (tc > s_last_tc + 0.5f || tc < s_last_tc - 0.5f) {
+            s_last_tc = tc;
+            snprintf(buf, sizeof(buf), "%05.2fC", tc);
             strncpy(g_prev_tc, buf, sizeof(g_prev_tc) - 1);
             UpdateZone(0, ROW_TEMP_Y, SML_FULL_W, ROW_TEMP_H,
                        buf, ST7735_ORANGE, SML_S);
         }
-    } 
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION I — PUBLIC HELPER: WiFi status
+// SECTION I — PUBLIC HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void ST7735_SetWifiStatus(uint8_t connected)
@@ -586,6 +586,14 @@ void ST7735_SetWifiStatus(uint8_t connected)
     if (g_wifi_ok != connected) {
         g_wifi_ok      = connected;
         g_prev_wifi[0] = '\0';   // force status row redraw on next tick
+    }
+}
+
+void ST7735_SetRelayState(uint8_t on)
+{
+    if (g_relay_state != on) {
+        g_relay_state = on;
+        g_prev_on[0]  = '\0';   // force status row redraw on next tick
     }
 }
 
@@ -671,7 +679,7 @@ static commandResult_t CMD_ST7735_Update(const void *ctx, const char *cmd,
     ST7735_DrawEnergyScreen(
         HT7017_GetVoltage(), HT7017_GetCurrent(), HT7017_GetPower(),
         HT7017_GetWh() / 1000.0f, HT7017_GetPowerFactor(),
-        HT7017_GetFrequency(), 0.0f, 1);
+        HT7017_GetFrequency(), 0.0f, g_relay_state);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: manual update");
     return CMD_RES_OK;
 }
@@ -703,8 +711,73 @@ static commandResult_t CMD_ST7735_Wifi(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
+// "st7735_relay 1" / "st7735_relay 0" — called from script rules:
+//   on ch8=1 do st7735_relay 1 endon
+//   on ch7=1 do st7735_relay 0 endon
+static commandResult_t CMD_ST7735_Relay(const void *ctx, const char *cmd,
+                                        const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    ST7735_SetRelayState((uint8_t)(atoi(args) != 0));
+    return CMD_RES_OK;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION K — INIT
+// SECTION K — RELAY + BUTTON LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static void FireRelay(uint8_t turn_on)
+{
+    extern int CHANNEL_Set(int index, int value, int reason);
+    if (turn_on) {
+        CHANNEL_Set(RELAY_CH_ON,  1, 0);
+        CHANNEL_Set(RELAY_CH_ON,  0, 0);
+        ST7735_SetRelayState(1);
+    } else {
+        CHANNEL_Set(RELAY_CH_OFF, 1, 0);
+        CHANNEL_Set(RELAY_CH_OFF, 0, 0);
+        ST7735_SetRelayState(0);
+    }
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "ST7735: relay → %s", turn_on ? "ON" : "OFF");
+}
+
+// Returns 1 on confirmed falling edge (button press), 0 otherwise.
+// Polled once per second. *last=last stable level, *db=debounce counter.
+static uint8_t DebouncePin(int pin, uint8_t *last, uint8_t *db)
+{
+    extern int HAL_PIN_ReadDigitalInput(int pin);
+    uint8_t level = (uint8_t)HAL_PIN_ReadDigitalInput(pin);
+    if (level == *last) { *db = 0; return 0; }
+    if (++(*db) < BTN_DEBOUNCE_TICKS) return 0;
+    *db = 0; *last = level;
+    return (level == 0) ? 1 : 0;
+}
+
+static void ST7735_PollButtons(void)
+{
+    // Btn1 P28 [ON/OFF] — toggle relay
+    if (DebouncePin(BUTTON1_PIN, &g_btn1_last, &g_btn1_db)) {
+        FireRelay(g_relay_state ? 0 : 1);
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "ST7735: Btn1(P28) → relay %s", g_relay_state ? "ON" : "OFF");
+    }
+
+    // Btn2 P26 [+] — RESERVED for future use (brightness / threshold UP)
+    if (DebouncePin(BUTTON2_PIN, &g_btn2_last, &g_btn2_db)) {
+        // TODO: brightness increase or high-voltage threshold adjust
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: Btn2(P26) [+] pressed");
+    }
+
+    // Btn3 P20 [−] — RESERVED for future use (brightness / threshold DOWN)
+    if (DebouncePin(BUTTON3_PIN, &g_btn3_last, &g_btn3_db)) {
+        // TODO: brightness decrease or low-voltage threshold adjust
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "ST7735: Btn3(P20) [-] pressed");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION L — INIT
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void ST7735_Init(void)
@@ -728,7 +801,11 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_cs);
     HAL_PIN_Setup_Output(g_pin_blk);
 
-//    ();   // P23 → analogue input for NTC thermistor
+    // Buttons: active-low, internal pull-up
+    HAL_PIN_Setup_Input_Pullup(BUTTON1_PIN);   // P28 [ON/OFF]
+    HAL_PIN_Setup_Input_Pullup(BUTTON2_PIN);   // P26 [+]
+    HAL_PIN_Setup_Input_Pullup(BUTTON3_PIN);   // P20 [−]
+    g_btn1_last = g_btn2_last = g_btn3_last = 1;
 
     SPI_CS_H(); SPI_SCK_L(); SPI_SDA_L(); SPI_DC_H(); SPI_RES_H();
     SPI_BLK_L();   // backlight ON (active-low on KWS-303WF)
@@ -751,20 +828,25 @@ void ST7735_Init(void)
     CMD_RegisterCommand("st7735_scale",      CMD_ST7735_Scale,      NULL);
     CMD_RegisterCommand("st7735_resetTimer", CMD_ST7735_ResetTimer, NULL);
     CMD_RegisterCommand("st7735_wifi",       CMD_ST7735_Wifi,       NULL);
+    CMD_RegisterCommand("st7735_relay",      CMD_ST7735_Relay,      NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "ST7735: ready 80x160 col_off=%d row_off=%d NTC_ch=%d",
               ST7735_COL_OFFSET, ST7735_ROW_OFFSET, ADC_TEMP_CHANNEL);
 }
 
-// ─── Auto-refresh every 2 seconds ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION M — RUN EVERY SECOND
+// ═══════════════════════════════════════════════════════════════════════════════
+
 static uint8_t g_refresh_counter = 0;
 
 void ST7735_RunEverySecond(void)
 {
     if (!g_initialized) return;
 
-    g_uptime_seconds++;   // tick every second regardless of display rate
+    g_uptime_seconds++;
+    ST7735_PollButtons();
 
     if (++g_refresh_counter < 2) return;
     g_refresh_counter = 0;
@@ -775,7 +857,6 @@ void ST7735_RunEverySecond(void)
     extern float HT7017_GetWh(void);
     extern float HT7017_GetPowerFactor(void);
     extern float HT7017_GetFrequency(void);
-   // extern uint8_t Relay_GetState(void);   // replace with your actual relay getter
 
     ST7735_DrawEnergyScreen(
         HT7017_GetVoltage(),
@@ -784,10 +865,8 @@ void ST7735_RunEverySecond(void)
         HT7017_GetWh() / 1000.0f,
         HT7017_GetPowerFactor(),
         HT7017_GetFrequency(),
-        0.0f,
-        0.0f);
-        // ignored — temperature always read from ADC
-       // Relay_GetState());   // 1 = ON, 0 = OFF
+        0.0f,             // ignored — temperature read from ADC inside DrawEnergyScreen
+        g_relay_state);
 }
 
 void ST7735_AppendInformationToHTTPIndexPage(http_request_t *request)
