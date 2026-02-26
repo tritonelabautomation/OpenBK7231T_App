@@ -506,7 +506,7 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     }
 
     // ── CURRENT: "00.00" + A label  (CYAN, scale2) ───────────────────────────
-    snprintf(buf, sizeof(buf), "%5.2f", a);
+    snprintf(buf, sizeof(buf), "%4.2f", a);
     if (strcmp(buf, g_prev_a) != 0) {
         strncpy(g_prev_a, buf, sizeof(g_prev_a) - 1);
         UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_CYAN, VAL_S);
@@ -846,7 +846,7 @@ void ST7735_RunEverySecond(void)
     g_uptime_seconds++;
     ST7735_PollButtons();
 
-    if (++g_refresh_counter < 2) return;
+    if (++g_refresh_counter < 1) return;
     g_refresh_counter = 0;
 
     extern float HT7017_GetVoltage(void);
