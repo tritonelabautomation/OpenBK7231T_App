@@ -118,7 +118,8 @@ static uint32_t g_uptime_seconds = 0;
 #define NTC_T0_K          298.15f   // 25 °C in Kelvin
 // NTC_PULLUP 0 → Vcc→Rs→ADC_pin→NTC→GND  (most common, Rs is pull-up)
 // NTC_PULLUP 1 → Vcc→NTC→ADC_pin→Rs→GND  (NTC is pull-up)
-#define NTC_PULLUP        0
+//Updated from 0 to 1 NTC PULLUp
+#define NTC_PULLUP        1  
 
 // ─── Latching relay (schematic-verified) ─────────────────────────────────────
 // Ch8 → GPIO P7 = ON  coil  |  Ch7 → GPIO P8 = OFF coil
