@@ -258,7 +258,7 @@
 //#define ENABLE_DRIVER_BKPARTITIONS				1
 #define ENABLE_HA_DISCOVERY						1
 #define ENABLE_SEND_POSTANDGET					1
-#define ENABLE_MQTT								0
+#define ENABLE_MQTT								1
 #define ENABLE_TASMOTADEVICEGROUPS				1
 #define ENABLE_LITTLEFS							1
 #define ENABLE_NTP								1
