@@ -434,7 +434,7 @@ static float ST7735_ReadTempC(void)
 
     // Steinhart–Hart B-parameter: 1/T = 1/T0 + (1/B)·ln(Rntc/R25)
     float temp_k = 1.0f / (1.0f / NTC_T0_K + logf(rntc / NTC_R25) / NTC_B);
-    return temp_k - 273.16f;
+    return temp_k - 273.15f;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
