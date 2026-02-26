@@ -363,11 +363,11 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define ROW_STATUS_Y    0
 #define ROW_STATUS_H   10
 #define ROW_V_Y        11
-#define ROW_V_H        28
+#define ROW_V_H        29
 #define ROW_A_Y        40      // 11+29
-#define ROW_A_H        28
+#define ROW_A_H        29
 #define ROW_W_Y        69      // 40+29
-#define ROW_W_H        28
+#define ROW_W_H        29
 #define ROW_KWH_Y      98      // 69+29
 #define ROW_KWH_H      15
 #define ROW_TMR_Y     113      // 98+15 (no divider between kWh & timer)
