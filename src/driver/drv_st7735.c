@@ -10,16 +10,16 @@
  * │  DISPLAY LAYOUT  80×160px — fully utilised          │
  * │                                                     │
  * │  Y=  0 h=10  ON      WiFi     ← GREEN|GREY  BLUE    │
- * │  Y= 11 h=28  00.0          V  ← RED   scale2        │
- * │  Y= 40 h=28  00.00         A  ← CYAN  scale2        │
- * │  Y= 69 h=28  00.0          W  ← YELLOW scale2       │
- * │  Y= 98 h=17  000.00KWh        ← CYAN  scale1        │
- * │  Y=113 h=17  00:00:00T        ← WHITE scale1        │
- * │  Y=129 h=17  0.00PF  50.0Hz   ← RED | BLUE scale1   │
- * │  Y=145 h=17  00.00C           ← ORANGE scale1       │
+ * │  Y= 11 h=29  00.0          V  ← RED   scale2        │
+ * │  Y= 40 h=29  00.00         A  ← CYAN  scale2        │
+ * │  Y= 69 h=29  00.0          W  ← YELLOW scale2       │
+ * │  Y= 98 h=16  000.00KWh        ← CYAN  scale1        │
+ * │  Y=113 h=16  00:00:00T        ← WHITE scale1        │
+ * │  Y=129 h=16  0.00PF  50.0Hz   ← RED | BLUE scale1   │
+ * │  Y=145 h=15  00.00C           ← ORANGE scale1       │
  * └─────────────────────────────────────────────────────┘
  *
- * TOTAL = 10+1+28+1+28+1+28+1+15+15+1+15+1+15 = 160px EXACT
+ * TOTAL = 10+29+29+29+16+16+16+15 = 160px  (Use this for complete utilization of TFT display)
  *
  * PIXEL MATHS verified:
  *   scale2: FONT_ADV*2=12px/ch, FONT_H*2=14px tall
@@ -364,21 +364,18 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define ROW_STATUS_H   10
 #define ROW_V_Y        11
 #define ROW_V_H        28
-#define ROW_A_Y        40      // 11+28+1
+#define ROW_A_Y        40      // 11+29
 #define ROW_A_H        28
-#define ROW_W_Y        69      // 40+28+1
+#define ROW_W_Y        69      // 40+29
 #define ROW_W_H        28
-#define ROW_KWH_Y      98      // 69+28+1
+#define ROW_KWH_Y      98      // 69+29
 #define ROW_KWH_H      15
 #define ROW_TMR_Y     113      // 98+15 (no divider between kWh & timer)
 #define ROW_TMR_H      15
-                               // divider at 128 (113+15)
-#define ROW_PFHZ_Y    129      // 128+1
+#define ROW_PFHZ_Y    128      // 128
 #define ROW_PFHZ_H     15
-                               // divider at 144 (129+15)
-#define ROW_TEMP_Y    145      // 144+1
+#define ROW_TEMP_Y    144      // 144
 #define ROW_TEMP_H     15
-                               // 145+15 = 160 ✓
 
 // Font scales
 #define VAL_S  2   // large: 12px/ch wide, 14px tall
