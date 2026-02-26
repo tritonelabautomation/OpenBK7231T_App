@@ -504,21 +504,21 @@ void ST7735_DrawEnergyScreen(float v, float a, float w,
     snprintf(buf, sizeof(buf), "%4.2f", v);
     if (strcmp(buf, g_prev_v) != 0) {
         strncpy(g_prev_v, buf, sizeof(g_prev_v) - 1);
-        UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, );
+        UpdateZone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, SML_S);
     }
 
     // ── CURRENT: "00.00" + A label  (CYAN, scale2) ───────────────────────────
     snprintf(buf, sizeof(buf), "%5.2f", a);
     if (strcmp(buf, g_prev_a) != 0) {
         strncpy(g_prev_a, buf, sizeof(g_prev_a) - 1);
-        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_CYAN, );
+        UpdateZone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_CYAN, SML_S);
     }
 
     // ── POWER: "00.0" + W label  (YELLOW, scale2) ────────────────────────────
     snprintf(buf, sizeof(buf), "%4.2f", w);
     if (strcmp(buf, g_prev_w) != 0) {
         strncpy(g_prev_w, buf, sizeof(g_prev_w) - 1);
-        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_YELLOW, );
+        UpdateZone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_YELLOW, SML_S);
     }
 
     // ── kWh: "000.00KWh"  (CYAN, scale1, full 80px row) ─────────────────────
