@@ -1,708 +1,850 @@
 /*
- * drv_ht7017.c  –  HT7017 energy metering IC driver  v12
+ * HT7017 Energy Metering IC — Driver for KWS-303WF  v11
  *
- * Hardware: BK7231N (CBU module), UART1 RX1/TX1 → HT7017 TX/RX
- *           KWS-303WF, 300 µΩ manganin shunt, 40 A max
+ * v11 ADDITIONS (zero changes to v10 working code):
+ *   + Q1   (reg 0x0B)  Reactive power        SIGNED 24-bit  VAR
+ *   + S1   (reg 0x0C)  Apparent power         own scale      VA
+ *   + EP1  (reg 0x13)  Active energy accum    delta→Wh       Wh
+ *   + EQ1  (reg 0x14)  Reactive energy accum  delta→VARh     VARh
+ *   + PFCNT1 (reg 0x10) Power factor count    raw counter
+ *   + HT7017_Energy_Reset command
+ *   + HT7017_Energy command  (kWh, kVARh, session time via NTP)
+ *   + FREQ polled twice per cycle (positions 3 and 9) — stays fresh
+ *   + Updated HT7017_Status and HTTP page show all new values
  *
- * Datasheet ref: HT7017 User Manual Rev1.3 (20000:1 version)
- *   femu = 1 MHz (Emuclk_Sel=1, default), OSR = 64 (default)
- *   Freq formula: Frequency = (femu × 32) / (OSR × Freq_U raw)
- *                           = 500000 / Freq_U_raw
- *   Default reset value of Freq_U = 0x2710 → 500000/10000 = 50 Hz ✓
+ * FREQ NOTE (from datasheet + log analysis):
+ *   The FREQ register is a PERIOD counter — chip counts its internal clock
+ *   cycles per AC half-cycle, then outputs a 24-bit value.
+ *   At 50Hz: raw ~10000, scale 200.0 → 10000/200 = 50.0Hz  (confirmed)
+ *   At 60Hz: raw ~8333,  scale 200.0 → 8333/200 = 41.7Hz  (wrong — needs
+ *            scale 138.9 for 60Hz grids).
+ *   Update rate: chip refreshes every AC cycle (~20ms). Our poll is every
+ *   10s so readings are always current. Polling twice per cycle (pos 3+9)
+ *   keeps display fresh even on long rotation.
  *
- * Fixes applied vs v11:
- *   1. FREQ formula corrected:  freq = 500000.0f / raw  (was raw/200 — only accurate at 50Hz)
- *   2. Register addresses fully verified against datasheet register table §5.1
- *      0x0B = PowerQ1  ✓   0x0C = PowerS  ✓   0x0D = EnergyP  ✓
- *      0x0E = EnergyQ  ✓   0x10 = PowerP2 (NOT PFCNT — PFCNT removed)
- *      0x13 = EnergyP_Bak (4-byte, backup cmd only)
- *      0x14 = EnergyQ_Bak (4-byte, backup cmd only)
- *      Energy is now read from 0x0D/0x0E (EnergyP/EnergyQ) only.
- *   3. PFCNT removed — no standalone PFCNT register; PFCnt (0x6F) is a
- *      calibration register not meant for polling.
- *   4. PowerP2 (0x10) / PowerQ2 (0x11) added as optional monitoring.
- *   5. Energy seeded flag: replaced 0xFFFFFFFF sentinel with bool flag.
- *   6. g_sScale: simplified to fabsf(g_pScale) — correct and clear.
- *   7. g_qScale: kept = g_pScale with comment; add ReactiveSet if needed.
- *   8. RunQuick / RunEverySecond desync fixed: separate consumed flag.
- *   9. Write-enable (WPREG 0x32) sequence added before any calibration write.
- *  10. 10 ms power-on delay enforced in HT7017_Init() per datasheet §2.2.
- *  11. ADCCON write triggers energy reliability mechanism (§3.11) — done in Init.
- *  12. Checksum verified: ~(HEAD+CMD+D2+D1+D0) & 0xFF — confirmed correct.
- *  13. Energy 24-bit unsigned wrap handled robustly.
- *  14. Signed 24-bit decode extracted into inline helper.
+ * EP1/EQ1 ENERGY ACCUMULATION:
+ *   The chip accumulates active (EP1) and reactive (EQ1) energy internally.
+ *   Each poll reads the current counter, computes delta from last reading,
+ *   converts to Wh/VARh via scale, adds to running total.
+ *   Wrap-around (counter reset by chip) is detected and handled.
+ *   EP1_SCALE default=1.0 (shows raw Wh counts). Calibrate by running a
+ *   known load for a known time:
+ *     EP1_SCALE = raw_delta / actual_wh
+ *   NTP start/reset timestamps recorded for session kWh/kVARh rate display.
  *
- * Calibration commands (via UART console):
- *   VoltageSet <V>        – set voltage scale
- *   CurrentSet <A>        – set current scale
- *   PowerSet <W>          – set active power scale (also sets Q and S scale)
- *   ReactiveSet <VAR>     – set reactive power scale independently
- *   EnergyReset           – reset energy accumulators
+ * ROTATION: 12 slots, one per second, full cycle = 12 seconds.
+ *   Slots: V I P Q S PFCNT F EP1 EQ1 V I F
+ *   (V, I, F repeated to keep fast-changing values fresh)
  *
- * UART frame (read):
- *   TX: HEAD(0x6A) | CMD(0x00|reg) | — 2 bytes total
- *   RX: D2 | D1 | D0 | CS          — 4 bytes
- *   CS (from chip) = ~(HEAD+CMD+D2+D1+D0) & 0xFF
- *
- * UART frame (write):
- *   TX: HEAD(0x6A) | CMD(0x80|reg) | DATA_H | DATA_L | CS — 5 bytes
- *   CS (master) = ~(HEAD+CMD+DATA_H+DATA_L) & 0xFF
- *   RX: ACK (0x54 = OK, 0x63 = error)
- *   Must send write-enable (WPREG = 0xBC or 0xA6) first.
+ * RULES:
+ *   No channel.h  |  No powerMeasurementCalibration  |  No CFG_SetExtended
+ *   Channel publish via CMD_ExecuteCommand("setChannel N V")
  */
+
+#include "../obk_config.h"
+#if ENABLE_DRIVER_HT7017
 
 #include "drv_ht7017.h"
-#include "tuya_uart.h"   /* or your BSP UART HAL */
-#include "rtos_pub.h"
-#include <math.h>
-#include <string.h>
+#include "drv_uart.h"
+#include "../logging/logging.h"
+#include "../new_cfg.h"
+#include "../new_pins.h"
+#include "../cmnds/cmd_public.h"
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <math.h>
 
-/* ─────────────────────────────────────────────────────────
- * Register addresses – verified against datasheet §5.1 table
- * ───────────────────────────────────────────────────────── */
-#define HT7017_REG_SPL_I1       0x00  /* ADC waveform Ch1 current (RO,3B) */
-#define HT7017_REG_SPL_I2       0x01  /* ADC waveform Ch2 current (RO,3B) */
-#define HT7017_REG_SPL_U        0x02  /* ADC waveform voltage     (RO,3B) */
-#define HT7017_REG_DC_I         0x03  /* DC mean current          (RO,3B) */
-#define HT7017_REG_DC_U         0x04  /* DC mean voltage          (RO,3B) */
-/*      0x05 reserved                                                       */
-#define HT7017_REG_RMS_I1       0x06  /* RMS current ch1          (RO,3B) */
-#define HT7017_REG_RMS_I2       0x07  /* RMS current ch2          (RO,3B) */
-#define HT7017_REG_RMS_U        0x08  /* RMS voltage              (RO,3B) */
-#define HT7017_REG_FREQ_U       0x09  /* Frequency counter        (RO,2B, reset=0x2710) */
-#define HT7017_REG_POWER_P1     0x0A  /* Active power ch1    (RO,3B signed) */
-#define HT7017_REG_POWER_Q1     0x0B  /* Reactive power ch1  (RO,3B signed) */
-#define HT7017_REG_POWER_S      0x0C  /* Apparent power      (RO,3B signed) */
-#define HT7017_REG_ENERGY_P     0x0D  /* Active energy accumulator (RO,3B unsigned) */
-#define HT7017_REG_ENERGY_Q     0x0E  /* Reactive energy accum.    (RO,3B unsigned) */
-#define HT7017_REG_UDET_CNT     0x0F  /* SAG/Peak duration cnt     (RO,3B) */
-#define HT7017_REG_POWER_P2     0x10  /* Active power ch2    (RO,3B signed) */
-#define HT7017_REG_POWER_Q2     0x11  /* Reactive power ch2  (RO,3B signed) */
-#define HT7017_REG_MAXUWAVE     0x12  /* Voltage half-wave peak    (RO,3B) */
-#define HT7017_REG_ENERGY_P_BAK 0x13  /* Active energy backup (RO,4B – use broadcast cmd) */
-#define HT7017_REG_ENERGY_Q_BAK 0x14  /* Reactive energy backup (RO,4B) */
-#define HT7017_REG_EMUSR        0x19  /* EMU status               (RO,2B) */
-#define HT7017_REG_SYSSTA       0x1A  /* System status (WREN bit) (RO,1B) */
-#define HT7017_REG_CHIP_ID      0x1B  /* Chip ID = 0x7053F0       (RO,3B) */
-#define HT7017_REG_ENERGY_P_NEG 0x1D  /* Reverse active energy    (RO,3B) */
-#define HT7017_REG_ENERGY_Q_NEG 0x1E  /* Reverse reactive energy  (RO,3B) */
-
-/* Calibration (write-protected) registers */
-#define HT7017_REG_EMUIE        0x30  /* Interrupt enable          (R/W,2B) */
-#define HT7017_REG_EMUIF        0x31  /* Interrupt flags           (RO,2B)  */
-#define HT7017_REG_WPREG        0x32  /* Write-protect             (R/W,1B) */
-#define HT7017_REG_SRSTREG      0x33  /* Software reset (write 0x55)(R/W,1B) */
-#define HT7017_REG_AVG_PRMS     0x3F  /* Averaging points          (R/W,2B, default=0x04E2) */
-#define HT7017_REG_EMUCFG       0x40  /* EMU config                (R/W,2B) */
-#define HT7017_REG_FREQCFG      0x41  /* Clock/freq config         (R/W,2B, default=0x0088) */
-#define HT7017_REG_MODULE_EN    0x42  /* Module enable             (R/W,2B, default=0x007E) */
-#define HT7017_REG_ANAEN        0x43  /* ADC enable                (R/W,1B, default=0x03) */
-#define HT7017_REG_ANACFG       0x44  /* Analog config             (R/W,2B, default=0x9409) */
-#define HT7017_REG_IOCFG        0x45  /* IO config                 (R/W,1B) */
-#define HT7017_REG_GP1          0x50  /* Active power gain ch1     (R/W,2B) */
-#define HT7017_REG_GQ1          0x51  /* Reactive power gain ch1   (R/W,2B) */
-#define HT7017_REG_GS1          0x52  /* Apparent power gain ch1   (R/W,2B) */
-#define HT7017_REG_ALGCFG       0x57  /* Algorithm config          (R/W,2B) */
-#define HT7017_REG_ADCCON       0x59  /* ADC gain config           (R/W,2B) */
-#define HT7017_REG_I1OFF        0x5C  /* Ch1 DC offset             (R/W,2B) */
-#define HT7017_REG_UOFF         0x5E  /* Voltage DC offset         (R/W,2B) */
-#define HT7017_REG_PSTART       0x5F  /* Active power threshold    (R/W,2B, default=0x0040) */
-#define HT7017_REG_QSTART       0x60  /* Reactive power threshold  (R/W,2B, default=0x0040) */
-#define HT7017_REG_HFCONST      0x61  /* Pulse freq constant       (R/W,2B, default=0x0040) */
-#define HT7017_REG_DEC_SHIFT    0x64  /* Phase shift               (R/W,1B) */
-#define HT7017_REG_GPHS1        0x6D  /* Phase correction ch1      (R/W,2B) */
-
-/* Write-protect unlock codes */
-#define HT7017_WPEN_LOW         0xBC  /* Unlocks 0x35-0x45, 0x4A-0x4F */
-#define HT7017_WPEN_HIGH        0xA6  /* Unlocks 0x50-0x7E             */
-#define HT7017_WP_LOCK          0x00  /* Re-locks all                  */
-
-/* UART frame constants */
-#define HT7017_HEAD             0x6A
-#define HT7017_CMD_READ         0x00  /* bit7=0 = read  */
-#define HT7017_CMD_WRITE        0x80  /* bit7=1 = write */
-#define HT7017_ACK_OK           0x54
-#define HT7017_ACK_ERR          0x63
-
-/* Frequency formula (femu=1MHz, OSR=64):
- *   Frequency = (1000000 × 32) / (64 × Freq_U_raw) = 500000 / Freq_U_raw
- * Default raw = 0x2710 (10000) → 500000/10000 = 50.0 Hz
- * At 60 Hz: raw = 500000/60 ≈ 8333 → 500000/8333 = 60.0 Hz ✓
- */
-#define HT7017_FREQ_CONST       500000.0f
-
-/* ─────────────────────────────────────────────────────────
- * Default calibration constants (override after empirical cal)
- * ───────────────────────────────────────────────────────── */
-#ifndef HT7017_DEFAULT_VOLTAGE_SCALE
-#define HT7017_DEFAULT_VOLTAGE_SCALE    200.0f   /* counts per Volt */
-#endif
-#ifndef HT7017_DEFAULT_CURRENT_SCALE
-#define HT7017_DEFAULT_CURRENT_SCALE    1500.0f  /* counts per Amp  */
-#endif
-#ifndef HT7017_DEFAULT_POWER_SCALE
-#define HT7017_DEFAULT_POWER_SCALE      5000.0f  /* counts per Watt */
-#endif
-#ifndef HT7017_DEFAULT_ENERGY_SCALE
-#define HT7017_DEFAULT_ENERGY_SCALE     100.0f   /* counts per Wh   */
-#endif
-#ifndef HT7017_DEFAULT_CURRENT_OFFSET
-#define HT7017_DEFAULT_CURRENT_OFFSET   500      /* raw ADC noise floor */
+#ifndef LOG_FEATURE_ENERGY
+#define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
 #endif
 
-/* ─────────────────────────────────────────────────────────
- * State variables – all static, private to this file
- * ───────────────────────────────────────────────────────── */
-static float  g_voltage    = 0.0f;   /* Vrms */
-static float  g_current    = 0.0f;   /* Arms */
-static float  g_power      = 0.0f;   /* W    */
-static float  g_reactive   = 0.0f;   /* VAR  */
-static float  g_apparent   = 0.0f;   /* VA   */
-static float  g_freq       = 50.0f;  /* Hz   */
-static float  g_energyWh   = 0.0f;   /* Wh   */
-static float  g_energyVARh = 0.0f;   /* VARh */
-static float  g_powerP2    = 0.0f;   /* W  ch2 (optional) */
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION A — v10 CORE (unchanged)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-/* Calibration scales */
-static float  g_vScale     = HT7017_DEFAULT_VOLTAGE_SCALE;
-static float  g_iScale     = HT7017_DEFAULT_CURRENT_SCALE;
-static float  g_pScale     = HT7017_DEFAULT_POWER_SCALE;
-static float  g_qScale     = HT7017_DEFAULT_POWER_SCALE;  /* same unit as P */
-static float  g_sScale     = HT7017_DEFAULT_POWER_SCALE;  /* |P scale|      */
-static float  g_eScale     = HT7017_DEFAULT_ENERGY_SCALE; /* counts per Wh  */
-static float  g_eqScale    = HT7017_DEFAULT_ENERGY_SCALE; /* counts per VARh*/
+static float g_vScale  = HT7017_DEFAULT_VOLTAGE_SCALE;
+static float g_iScale  = HT7017_DEFAULT_CURRENT_SCALE;
+static float g_pScale  = HT7017_DEFAULT_POWER_SCALE;
+static float g_fScale  = HT7017_DEFAULT_FREQ_SCALE;
+static float g_iOffset = HT7017_CURRENT_OFFSET;
 
-/* Current offset – raw counts at zero load */
-static int32_t g_iOffset   = HT7017_DEFAULT_CURRENT_OFFSET;
+static uint32_t g_lastRawV = 0;
+static uint32_t g_lastRawI = 0;
+static uint32_t g_lastRawP = 0;
 
-/* Last raw values captured for use by calibration commands */
-static uint32_t g_lastRawV  = 0;
-static int32_t  g_lastRawI  = 0;
-static int32_t  g_lastRawP  = 0;
-static int32_t  g_lastRawQ  = 0;
-static int32_t  g_lastRawS  = 0;
+static float g_voltage      = 0.0f;
+static float g_current      = 0.0f;
+static float g_power        = 0.0f;
+static float g_freq         = 0.0f;
+static float g_apparent     = 0.0f;   // V * I always-valid computed value
+static float g_power_factor = 0.0f;
 
-/* Energy accumulation (24-bit unsigned, wraps at 0xFFFFFF) */
-static uint32_t g_epLast    = 0;
-static uint32_t g_eqLast    = 0;
-static bool     g_epSeeded  = false;  /* safer than sentinel value */
-static bool     g_eqSeeded  = false;
+static uint8_t  g_regIndex    = 0;
+static uint8_t  g_missCount   = 0;
+static uint32_t g_txCount     = 0;
+static uint32_t g_goodFrames  = 0;
+static uint32_t g_badFrames   = 0;
+static uint32_t g_totalMisses = 0;
 
-/* Register rotation table – registers to poll each slot */
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION B — v11 NEW MEASUREMENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// New scale factors
+static float g_qScale  = HT7017_DEFAULT_POWER_SCALE;     // Q1 reactive (same sign convention as P1)
+static float g_sScale  = HT7017_DEFAULT_APPARENT_SCALE;  // S1 apparent (own scale, unsigned)
+static float g_e1Scale = HT7017_DEFAULT_EP1_SCALE;       // EP1 active energy
+
+// New instantaneous measurements
+static float g_reactive     = 0.0f;   // Q1 reg 0x0B — reactive power (VAR)
+static float g_apparent_s1  = 0.0f;   // S1 reg 0x0C — apparent power from chip (VA)
+static float g_pf_count_raw = 0.0f;   // PFCNT1 reg 0x10 — raw counter value
+
+// Energy accumulators
+static uint32_t g_ep1_last  = 0xFFFFFFFF;  // sentinel = not yet seeded
+static uint32_t g_eq1_last  = 0xFFFFFFFF;
+static float    g_wh_total  = 0.0f;        // Wh accumulated since boot/reset
+static float    g_varh_total= 0.0f;        // VARh accumulated since boot/reset
+
+// NTP timestamps
+static uint32_t g_session_start_unix = 0;  // set at init once NTP is valid
+static uint32_t g_energy_reset_unix  = 0;  // updated by HT7017_Energy_Reset
+
+// ─── Register table ───────────────────────────────────────────────────────────
 typedef struct {
-    uint8_t  reg;
-    float   *scale;     /* NULL for special decoding */
-    float   *result;    /* NULL for special decoding */
-    bool     isSigned;  /* decode as signed 24-bit */
-} RegEntry;
+    uint8_t     reg;
+    float      *target;       // where to store converted value (or running total)
+    float      *scale;
+    uint8_t     is_signed;
+    uint8_t     has_offset;
+    uint8_t     is_energy;    // 1 = EP1/EQ1 accumulator, uses special delta logic
+    uint32_t   *last_raw_acc; // pointer to last-raw for accumulator wrap detection
+    float      *acc_total;    // pointer to running total for energy registers
+    uint32_t   *last_raw_cal; // pointer to last-raw for VoltageSet/CurrentSet/PowerSet
+    const char *name;
+    const char *unit;
+    uint8_t     obk_ch;
+} RegRead_t;
 
-/* Register poll rotation (12 slots, ~1/s each at 12s cycle) */
-static const RegEntry g_regTable[] = {
-    /* slot  reg                    scale          result         signed */
-    { HT7017_REG_RMS_U,     NULL, NULL, false }, /* 0: special  */
-    { HT7017_REG_RMS_I1,    NULL, NULL, false }, /* 1: special  */
-    { HT7017_REG_POWER_P1,  NULL, NULL, true  }, /* 2: special  */
-    { HT7017_REG_POWER_Q1,  NULL, NULL, true  }, /* 3: special  */
-    { HT7017_REG_POWER_S,   NULL, NULL, true  }, /* 4: special  */
-    { HT7017_REG_FREQ_U,    NULL, NULL, false }, /* 5: special  */
-    { HT7017_REG_ENERGY_P,  NULL, NULL, false }, /* 6: special  */
-    { HT7017_REG_ENERGY_Q,  NULL, NULL, false }, /* 7: special  */
-    { HT7017_REG_RMS_U,     NULL, NULL, false }, /* 8: repeat V */
-    { HT7017_REG_RMS_I1,    NULL, NULL, false }, /* 9: repeat I */
-    { HT7017_REG_POWER_P2,  NULL, NULL, true  }, /*10: ch2 P    */
-    { HT7017_REG_FREQ_U,    NULL, NULL, false }, /*11: repeat F */
-};
-#define REG_TABLE_LEN  (sizeof(g_regTable) / sizeof(g_regTable[0]))
+// 12-slot rotation — 12 seconds per full cycle
+// Slots: V I P Q S PFCNT F EP1 EQ1 V I F
+// V, I, F repeated so they stay fresh (every 6s instead of 12s)
+#define REG_TABLE_SIZE 12
+static RegRead_t g_regTable[REG_TABLE_SIZE];
 
-static uint8_t  g_regIndex       = 0;
-static bool     g_frameConsumed  = false; /* set by RunQuick, cleared by RunEverySecond */
-static bool     g_waitingReply   = false;
-static uint8_t  g_rxBuf[5];
-static uint8_t  g_rxLen         = 0;
-static uint32_t g_lastSendMs    = 0;
-static bool     g_initialized   = false;
-
-/* ─────────────────────────────────────────────────────────
- * Internal helpers
- * ───────────────────────────────────────────────────────── */
-
-/* Decode 3-byte big-endian as signed 24-bit two's complement → int32_t */
-static inline int32_t decode_signed24(uint8_t d2, uint8_t d1, uint8_t d0)
+static void HT7017_BuildRegTable(void)
 {
+    uint8_t i = 0;
+
+    // 0: Voltage
+    g_regTable[i].reg          = HT7017_REG_RMS_U;
+    g_regTable[i].target       = &g_voltage;
+    g_regTable[i].scale        = &g_vScale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = &g_lastRawV;
+    g_regTable[i].name         = "Voltage";
+    g_regTable[i].unit         = "V";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_VOLTAGE;
+    i++;
+
+    // 1: Current
+    g_regTable[i].reg          = HT7017_REG_RMS_I1;
+    g_regTable[i].target       = &g_current;
+    g_regTable[i].scale        = &g_iScale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 1;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = &g_lastRawI;
+    g_regTable[i].name         = "Current";
+    g_regTable[i].unit         = "A";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_CURRENT;
+    i++;
+
+    // 2: Active Power P1 (SIGNED)
+    g_regTable[i].reg          = HT7017_REG_POWER_P1;
+    g_regTable[i].target       = &g_power;
+    g_regTable[i].scale        = &g_pScale;
+    g_regTable[i].is_signed    = 1;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = &g_lastRawP;
+    g_regTable[i].name         = "Power";
+    g_regTable[i].unit         = "W";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_POWER;
+    i++;
+
+    // 3: Reactive Power Q1 (SIGNED) — NEW
+    // Q1 uses the same signed 24-bit 2's complement format as P1.
+    // Positive Q = inductive load (motors, transformers)
+    // Negative Q = capacitive load (PFC corrected supplies, capacitor banks)
+    g_regTable[i].reg          = HT7017_REG_POWER_Q1;
+    g_regTable[i].target       = &g_reactive;
+    g_regTable[i].scale        = &g_qScale;
+    g_regTable[i].is_signed    = 1;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = NULL;
+    g_regTable[i].name         = "Reactive";
+    g_regTable[i].unit         = "VAR";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_REACTIVE;
+    i++;
+
+    // 4: Apparent Power S1 (unsigned) — NEW, own scale
+    // S1 raw units differ from P1. Calibrate: S_actual = V_actual * I_actual
+    // then S1_SCALE = raw_S1 / S_actual.
+    // Until calibrated, S1 reading is shown in log but not published.
+    g_regTable[i].reg          = HT7017_REG_POWER_S1;
+    g_regTable[i].target       = &g_apparent_s1;
+    g_regTable[i].scale        = &g_sScale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = NULL;
+    g_regTable[i].name         = "Apparent";
+    g_regTable[i].unit         = "VA";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_APPARENT;
+    i++;
+
+    // 5: Power Factor Count PFCNT1 (unsigned) — NEW
+    // Raw counter incremented by chip each AC cycle weighted by power factor.
+    // Full-scale value when PF=1.0 is chip-config dependent.
+    // Stored raw / g_fScale (=200) for logging — not published to channel
+    // until full-scale reference is known.
+    g_regTable[i].reg          = HT7017_REG_PFCNT1;
+    g_regTable[i].target       = &g_pf_count_raw;
+    g_regTable[i].scale        = &g_fScale;   // arbitrary divisor for display
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = NULL;
+    g_regTable[i].name         = "PFCount";
+    g_regTable[i].unit         = "raw";
+    g_regTable[i].obk_ch       = 0;   // not published until full-scale known
+    i++;
+
+    // 6: Frequency — first occurrence
+    // FREQ is a period counter: chip measures clock cycles per AC half-cycle.
+    // At 50Hz grid: raw ~10000, scale 200.0 → 50.0Hz
+    // Chip updates every AC cycle (~20ms) so our 12s rotation always reads fresh.
+    // Repeated at slot 11 so display stays current.
+    g_regTable[i].reg          = HT7017_REG_FREQ;
+    g_regTable[i].target       = &g_freq;
+    g_regTable[i].scale        = &g_fScale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = NULL;
+    g_regTable[i].name         = "Freq";
+    g_regTable[i].unit         = "Hz";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_FREQ;
+    i++;
+
+    // 7: Active Energy EP1 (unsigned, accumulator) — NEW
+    // EP1 is an internal 24-bit counter that the chip increments as energy
+    // flows. We read the delta each poll, convert to Wh via g_e1Scale,
+    // and add to g_wh_total. Scale default=1.0 (raw counts = Wh approx).
+    // Calibrate: run known load W for known time T hours, then:
+    //   EP1_SCALE = raw_delta / (W * T)
+    g_regTable[i].reg          = HT7017_REG_EP1;
+    g_regTable[i].target       = &g_wh_total;
+    g_regTable[i].scale        = &g_e1Scale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 1;
+    g_regTable[i].last_raw_acc = &g_ep1_last;
+    g_regTable[i].acc_total    = &g_wh_total;
+    g_regTable[i].last_raw_cal = NULL;
+    g_regTable[i].name         = "ActiveEnergy";
+    g_regTable[i].unit         = "Wh";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_WH;
+    i++;
+
+    // 8: Reactive Energy EQ1 (unsigned, accumulator) — NEW
+    // Same logic as EP1 but for reactive energy.
+    g_regTable[i].reg          = HT7017_REG_EQ1;
+    g_regTable[i].target       = &g_varh_total;
+    g_regTable[i].scale        = &g_e1Scale;  // same scale as EP1
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 1;
+    g_regTable[i].last_raw_acc = &g_eq1_last;
+    g_regTable[i].acc_total    = &g_varh_total;
+    g_regTable[i].last_raw_cal = NULL;
+    g_regTable[i].name         = "ReactiveEnergy";
+    g_regTable[i].unit         = "VARh";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_VARH;
+    i++;
+
+    // 9: Voltage (repeat) — refresh every 6s instead of 12s
+    g_regTable[i].reg          = HT7017_REG_RMS_U;
+    g_regTable[i].target       = &g_voltage;
+    g_regTable[i].scale        = &g_vScale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = &g_lastRawV;
+    g_regTable[i].name         = "Voltage";
+    g_regTable[i].unit         = "V";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_VOLTAGE;
+    i++;
+
+    // 10: Current (repeat) — refresh every 6s
+    g_regTable[i].reg          = HT7017_REG_RMS_I1;
+    g_regTable[i].target       = &g_current;
+    g_regTable[i].scale        = &g_iScale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 1;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = &g_lastRawI;
+    g_regTable[i].name         = "Current";
+    g_regTable[i].unit         = "A";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_CURRENT;
+    i++;
+
+    // 11: Frequency (repeat) — keep fresh on 12s cycle
+    g_regTable[i].reg          = HT7017_REG_FREQ;
+    g_regTable[i].target       = &g_freq;
+    g_regTable[i].scale        = &g_fScale;
+    g_regTable[i].is_signed    = 0;
+    g_regTable[i].has_offset   = 0;
+    g_regTable[i].is_energy    = 0;
+    g_regTable[i].last_raw_acc = NULL;
+    g_regTable[i].acc_total    = NULL;
+    g_regTable[i].last_raw_cal = NULL;
+    g_regTable[i].name         = "Freq";
+    g_regTable[i].unit         = "Hz";
+    g_regTable[i].obk_ch       = HT7017_CHANNEL_FREQ;
+    i++;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION C — HELPERS (unchanged from v10 except UpdatePowerFactor)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static uint8_t HT7017_Checksum(uint8_t reg, uint8_t d2, uint8_t d1, uint8_t d0)
+{
+    return (uint8_t)(~(uint8_t)(HT7017_FRAME_HEAD + reg + d2 + d1 + d0));
+}
+
+static float HT7017_Convert(uint32_t raw, const RegRead_t *r)
+{
+    float val;
+    if (r->is_signed) {
+        int32_t s = (int32_t)raw;
+        if (s & 0x800000) s |= (int32_t)0xFF000000;
+        val = (float)s;
+    } else {
+        val = (float)raw;
+    }
+    if (r->has_offset) {
+        val -= g_iOffset;
+        if (val < 0.0f) val = 0.0f;
+    }
+    float result = val / (*r->scale);
+    if (r->is_signed && result > -1.0f && result < 1.0f) result = 0.0f;
+    return result;
+}
+
+static void HT7017_UpdateDerived(void)
+{
+    // Apparent power — always valid from V*I
+    g_apparent = g_voltage * g_current;
+
+    // Power factor — prefer chip S1 if calibrated (>0.5VA), else use V*I
+    float s = (g_apparent_s1 > 0.5f) ? g_apparent_s1 : g_apparent;
+    if (s > 0.5f && g_power > 0.0f) {
+        g_power_factor = g_power / s;
+        if (g_power_factor > 1.0f) g_power_factor = 1.0f;
+        if (g_power_factor < 0.0f) g_power_factor = 0.0f;
+    } else {
+        g_power_factor = 0.0f;
+    }
+}
+
+static void HT7017_PublishChannel(uint8_t ch, float value)
+{
+    if (ch == 0) return;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "setChannel %u %d", ch, (int)(value * 100.0f));
+    CMD_ExecuteCommand(buf, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION D — ENERGY ACCUMULATOR (new v11)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static void HT7017_AccumulateEnergy(uint32_t raw, const RegRead_t *r)
+{
+    // First reading — just seed the baseline, do not accumulate yet
+    if (*r->last_raw_acc == 0xFFFFFFFF) {
+        *r->last_raw_acc = raw;
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: [%s] seeded at raw=%u  accumulating from next read",
+                  r->name, raw);
+        return;
+    }
+
+    uint32_t delta;
+    if (raw >= *r->last_raw_acc) {
+        delta = raw - *r->last_raw_acc;
+    } else {
+        // 24-bit counter wrap-around (chip reset its internal accumulator)
+        delta = (0x00FFFFFF - *r->last_raw_acc) + raw + 1;
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: [%s] counter wrap last=%u new=%u delta=%u",
+                  r->name, *r->last_raw_acc, raw, delta);
+    }
+    *r->last_raw_acc = raw;
+
+    if (delta == 0) return;
+
+    float increment  = (float)delta / (*r->scale);
+    *r->acc_total   += increment;
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: [%s] raw=%u  delta=%u  +%.5f %s  total=%.4f %s",
+              r->name, raw, delta,
+              increment, r->unit,
+              *r->acc_total, r->unit);
+
+    if (r->obk_ch > 0) {
+        // Publish total in unit * 1000 for 3-decimal precision
+        // e.g. 1234 = 1.234 Wh — configure channel as "divided by 1000"
+        char buf[48];
+        snprintf(buf, sizeof(buf), "setChannel %u %d",
+                 r->obk_ch, (int)(*r->acc_total * 1000.0f));
+        CMD_ExecuteCommand(buf, 0);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION E — FRAME PROCESSING (v10 logic, extended for energy)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static void HT7017_ProcessFrame(uint8_t d2, uint8_t d1, uint8_t d0, uint8_t cs)
+{
+    const RegRead_t *r   = &g_regTable[g_regIndex];
+    uint8_t          exp = HT7017_Checksum(r->reg, d2, d1, d0);
+
+    if (cs != exp) {
+        g_badFrames++;
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: BAD CS reg=0x%02X got=0x%02X exp=0x%02X "
+                  "data=%02X %02X %02X (bad=%u)",
+                  r->reg, cs, exp, d2, d1, d0, g_badFrames);
+        return;
+    }
+
     uint32_t raw = ((uint32_t)d2 << 16) | ((uint32_t)d1 << 8) | d0;
-    if (raw & 0x800000u) raw |= 0xFF000000u;  /* sign-extend */
-    return (int32_t)raw;
-}
+    g_goodFrames++;
+    g_missCount = 0;
 
-/* Decode 3-byte big-endian as unsigned 24-bit */
-static inline uint32_t decode_unsigned24(uint8_t d2, uint8_t d1, uint8_t d0)
-{
-    return ((uint32_t)d2 << 16) | ((uint32_t)d1 << 8) | d0;
-}
+    // Store calibration raw if this slot has one
+    if (r->last_raw_cal) *r->last_raw_cal = raw;
 
-/* Compute UART checksum: ~(HEAD + CMD + D2 + D1 + D0) & 0xFF */
-static inline uint8_t ht7017_cs(uint8_t head, uint8_t cmd,
-                                  uint8_t d2, uint8_t d1, uint8_t d0)
-{
-    return (uint8_t)(~((uint32_t)head + cmd + d2 + d1 + d0) & 0xFF);
-}
+    if (r->is_energy) {
+        // Energy accumulator — special delta logic
+        HT7017_AccumulateEnergy(raw, r);
+    } else {
+        float value = HT7017_Convert(raw, r);
+        *r->target  = value;
 
-/* Send a 2-byte read request: HEAD | (0x00 | reg) */
-static void ht7017_send_read(uint8_t reg)
-{
-    uint8_t tx[2] = { HT7017_HEAD, (uint8_t)(HT7017_CMD_READ | (reg & 0x7F)) };
-    UART1_Send(tx, 2);
-    g_waitingReply  = true;
-    g_frameConsumed = false;
-    g_lastSendMs    = rtos_get_time();
-}
-
-/*
- * Send a write command to HT7017.
- * Write-enable MUST be set before calling (see ht7017_write_enable()).
- * Frame: HEAD | (0x80|reg) | data_H | data_L | CS
- * HT7017 replies with ACK (0x54 = OK).
- */
-static bool ht7017_write_reg(uint8_t reg, uint8_t data_h, uint8_t data_l)
-{
-    uint8_t cmd = (uint8_t)(HT7017_CMD_WRITE | (reg & 0x7F));
-    uint8_t cs  = ht7017_cs(HT7017_HEAD, cmd, 0, data_h, data_l);
-    /* Note: checksum covers HEAD+CMD+DATA_H+DATA_L (no 0-pad needed for write) */
-    cs = (uint8_t)(~((uint32_t)HT7017_HEAD + cmd + data_h + data_l) & 0xFF);
-
-    uint8_t tx[5] = { HT7017_HEAD, cmd, data_h, data_l, cs };
-    UART1_Send(tx, 5);
-
-    /* Wait for ACK byte (blocking, short timeout 5ms) */
-    uint8_t ack = 0;
-    uint32_t t0 = rtos_get_time();
-    while ((rtos_get_time() - t0) < 5) {
-        if (UART1_ByteAvailable()) {
-            ack = UART1_ReadByte();
-            break;
-        }
-    }
-    return (ack == HT7017_ACK_OK);
-}
-
-/* Unlock write-protect for low range (0x35-0x45, 0x4A-0x4F) */
-static bool ht7017_write_enable_low(void)
-{
-    /* WPREG is at 0x32 – write 0xBC */
-    return ht7017_write_reg(HT7017_REG_WPREG, 0x00, HT7017_WPEN_LOW);
-}
-
-/* Unlock write-protect for high range (0x50-0x7E) */
-static bool ht7017_write_enable_high(void)
-{
-    return ht7017_write_reg(HT7017_REG_WPREG, 0x00, HT7017_WPEN_HIGH);
-}
-
-/* Re-lock write-protect */
-static void ht7017_write_lock(void)
-{
-    ht7017_write_reg(HT7017_REG_WPREG, 0x00, HT7017_WP_LOCK);
-}
-
-/*
- * Process one complete 4-byte RX frame.
- * Called both from RunEverySecond and RunQuick.
- * Returns true if frame was valid.
- */
-static bool ht7017_process_frame(uint8_t reg)
-{
-    if (g_rxLen < 4) return false;
-
-    uint8_t d2 = g_rxBuf[0];
-    uint8_t d1 = g_rxBuf[1];
-    uint8_t d0 = g_rxBuf[2];
-    uint8_t cs = g_rxBuf[3];
-
-    uint8_t cmd = (uint8_t)(HT7017_CMD_READ | (reg & 0x7F));
-    uint8_t expected_cs = ht7017_cs(HT7017_HEAD, cmd, d2, d1, d0);
-
-    if (cs != expected_cs) {
-        bk_printf("[HT7017] BAD CS reg=%02X got=%02X exp=%02X\r\n",
-                  reg, cs, expected_cs);
-        return false;
-    }
-
-    int32_t  sv = decode_signed24(d2, d1, d0);
-    uint32_t uv = decode_unsigned24(d2, d1, d0);
-
-    switch (reg) {
-    /* ── Voltage ──────────────────────────────────── */
-    case HT7017_REG_RMS_U:
-        g_lastRawV = uv;
-        g_voltage  = (float)uv / g_vScale;
-        break;
-
-    /* ── Current ──────────────────────────────────── */
-    case HT7017_REG_RMS_I1: {
-        int32_t raw_i = (int32_t)uv;  /* RMS is unsigned per datasheet */
-        g_lastRawI = raw_i;
-        int32_t net = raw_i - g_iOffset;
-        if (net < 0) net = 0;
-        g_current = (float)net / g_iScale;
-        break;
-    }
-
-    /* ── Active power ─────────────────────────────── */
-    case HT7017_REG_POWER_P1:
-        g_lastRawP = sv;
-        g_power    = (float)sv / g_pScale;
-        break;
-
-    /* ── Reactive power ───────────────────────────── */
-    case HT7017_REG_POWER_Q1:
-        g_lastRawQ = sv;
-        g_reactive = (float)sv / g_qScale;
-        break;
-
-    /* ── Apparent power ───────────────────────────── */
-    case HT7017_REG_POWER_S:
-        g_lastRawS = sv;
-        g_apparent = (float)sv / g_sScale;
-        break;
-
-    /* ── Frequency ────────────────────────────────── */
-    case HT7017_REG_FREQ_U: {
-        /*
-         * Freq_U is a 16-bit period counter (MSB always 0).
-         * Formula from datasheet §5.1.2.4:
-         *   Frequency = (femu × 32) / (OSR × Freq_U)
-         *             = (1000000 × 32) / (64 × raw)
-         *             = 500000 / raw
-         * Default raw = 0x2710 (10000) → 50.0 Hz
-         * At 60 Hz:  raw ≈ 8333  → 60.0 Hz ✓
-         */
-        uint16_t raw_f = (uint16_t)(uv & 0xFFFF);
-        if (raw_f > 0) {
-            g_freq = HT7017_FREQ_CONST / (float)raw_f;
-        }
-        break;
-    }
-
-    /* ── Active energy accumulator ────────────────── */
-    case HT7017_REG_ENERGY_P: {
-        /*
-         * EnergyP (0x0D): 24-bit unsigned, read-after-no-clear by default.
-         * Monotonically increasing, wraps at 0xFFFFFF (16777215).
-         */
-        if (!g_epSeeded) {
-            g_epLast   = uv;
-            g_epSeeded = true;
+        if (r->is_signed) {
+            int32_t s = (int32_t)raw;
+            if (s & 0x800000) s |= (int32_t)0xFF000000;
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "HT7017: [%s] = %.3f %s  raw=%u signed=%d  CS=OK (good=%u)",
+                      r->name, value, r->unit, raw, s, g_goodFrames);
+        } else if (r->has_offset) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "HT7017: [%s] = %.3f %s  raw=%u net=%d  CS=OK (good=%u)",
+                      r->name, value, r->unit, raw,
+                      (int32_t)((int32_t)raw - (int32_t)g_iOffset),
+                      g_goodFrames);
         } else {
-            uint32_t delta;
-            if (uv >= g_epLast) {
-                delta = uv - g_epLast;
-            } else {
-                /* 24-bit wrap */
-                delta = (0x1000000u - g_epLast) + uv;
-            }
-            g_epLast    = uv;
-            g_energyWh += (float)delta / g_eScale;
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "HT7017: [%s] = %.3f %s  raw=%u  CS=OK (good=%u)",
+                      r->name, value, r->unit, raw, g_goodFrames);
         }
-        break;
-    }
 
-    /* ── Reactive energy accumulator ──────────────── */
-    case HT7017_REG_ENERGY_Q: {
-        if (!g_eqSeeded) {
-            g_eqLast   = uv;
-            g_eqSeeded = true;
-        } else {
-            uint32_t delta;
-            if (uv >= g_eqLast) {
-                delta = uv - g_eqLast;
-            } else {
-                delta = (0x1000000u - g_eqLast) + uv;
-            }
-            g_eqLast     = uv;
-            g_energyVARh += (float)delta / g_eqScale;
+        if (r->obk_ch > 0) {
+            HT7017_PublishChannel(r->obk_ch, value);
         }
-        break;
     }
 
-    /* ── Channel-2 active power (optional monitor) ── */
-    case HT7017_REG_POWER_P2:
-        g_powerP2 = (float)sv / g_pScale;
-        break;
-
-    default:
-        break;
+    // Recompute derived values after every measurement
+    HT7017_UpdateDerived();
+    if (HT7017_CHANNEL_PF > 0) {
+        HT7017_PublishChannel(HT7017_CHANNEL_PF, g_power_factor);
     }
 
-    g_rxLen = 0;
-    g_waitingReply  = false;
-    g_frameConsumed = true;
-    return true;
+    // Seed NTP session start on first valid reading after NTP sync
+    if (g_session_start_unix == 0) {
+        uint32_t now = NTP_GetCurrentTime();
+        if (now > 1000000000u) {   // sanity: after year 2001
+            g_session_start_unix = now;
+            g_energy_reset_unix  = now;
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "HT7017: NTP session start recorded unix=%u", now);
+        }
+    }
 }
 
-/* ─────────────────────────────────────────────────────────
- * Public API
- * ───────────────────────────────────────────────────────── */
+static void HT7017_SendRequest(uint8_t reg)
+{
+    UART_ConsumeBytes(UART_GetDataSize());
+    UART_SendByte(HT7017_FRAME_HEAD);
+    UART_SendByte(reg);
+    g_txCount += 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION F — CONSOLE COMMANDS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── VoltageSet / CurrentSet / PowerSet (v10 unchanged) ────────────────────────
+
+static commandResult_t CMD_VoltageSet(const void *ctx, const char *cmd,
+                                       const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float actual = (float)atof(args);
+    if (actual <= 0.0f) return CMD_RES_BAD_ARGUMENT;
+    if (g_lastRawV == 0) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: VoltageSet - no reading yet, wait one cycle");
+        return CMD_RES_ERROR;
+    }
+    float old = g_vScale;
+    g_vScale  = (float)g_lastRawV / actual;
+    g_voltage = actual;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: VoltageSet %.2fV raw=%u scale %.2f->%.2f "
+              "(update HT7017_DEFAULT_VOLTAGE_SCALE to make permanent)",
+              actual, g_lastRawV, old, g_vScale);
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_CurrentSet(const void *ctx, const char *cmd,
+                                       const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float actual = (float)atof(args);
+    if (actual <= 0.0f) return CMD_RES_BAD_ARGUMENT;
+    if (g_lastRawI == 0) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: CurrentSet - no reading yet, wait one cycle");
+        return CMD_RES_ERROR;
+    }
+    float net = (float)g_lastRawI - g_iOffset;
+    if (net <= 0.0f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: CurrentSet - net=%.0f too low, load too small?", net);
+        return CMD_RES_ERROR;
+    }
+    float old = g_iScale;
+    g_iScale  = net / actual;
+    g_current = actual;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: CurrentSet %.3fA raw=%u net=%.0f scale %.2f->%.2f "
+              "(update HT7017_DEFAULT_CURRENT_SCALE to make permanent)",
+              actual, g_lastRawI, net, old, g_iScale);
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_PowerSet(const void *ctx, const char *cmd,
+                                     const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float actual = (float)atof(args);
+    if (actual <= 0.0f) return CMD_RES_BAD_ARGUMENT;
+    if (g_lastRawP == 0) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: PowerSet - no reading yet, wait one cycle");
+        return CMD_RES_ERROR;
+    }
+    int32_t s = (int32_t)g_lastRawP;
+    if (s & 0x800000) s |= (int32_t)0xFF000000;
+    if (s == 0) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: PowerSet - signed raw=0, load connected?");
+        return CMD_RES_ERROR;
+    }
+    float old = g_pScale;
+    g_pScale  = (float)s / actual;
+    g_power   = actual;
+    // Apply same scale to Q1 and S1 as a starting approximation
+    // (refine with ReactiveSet/ApparentSet after calibration)
+    g_qScale  = g_pScale;
+    g_sScale  = g_pScale * -1.0f;  // S1 is unsigned so strip sign
+    if (g_sScale < 0.0f) g_sScale = -g_sScale;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: PowerSet %.1fW raw=%u signed=%d scale %.4f->%.4f "
+              "(update HT7017_DEFAULT_POWER_SCALE to make permanent)",
+              actual, g_lastRawP, s, old, g_pScale);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: Q scale also set to %.4f, S scale set to %.4f "
+              "(approximate — refine with real reactive/apparent load)",
+              g_qScale, g_sScale);
+    return CMD_RES_OK;
+}
+
+// ── HT7017_Energy_Reset (new) ─────────────────────────────────────────────────
+static commandResult_t CMD_EnergyReset(const void *ctx, const char *cmd,
+                                        const char *args, int flags)
+{
+    g_wh_total   = 0.0f;
+    g_varh_total = 0.0f;
+    g_ep1_last   = 0xFFFFFFFF;   // reseed on next EP1 reading
+    g_eq1_last   = 0xFFFFFFFF;
+
+    uint32_t now = NTP_GetCurrentTime();
+    g_energy_reset_unix = (now > 1000000000u) ? now : 0;
+
+    // Publish zero to energy channels
+    HT7017_PublishChannel(HT7017_CHANNEL_WH,   0.0f);
+    HT7017_PublishChannel(HT7017_CHANNEL_VARH, 0.0f);
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: Energy counters reset to 0  (unix=%u)", g_energy_reset_unix);
+    return CMD_RES_OK;
+}
+
+// ── HT7017_Energy (new) ───────────────────────────────────────────────────────
+static commandResult_t CMD_Energy(const void *ctx, const char *cmd,
+                                   const char *args, int flags)
+{
+    uint32_t now     = NTP_GetCurrentTime();
+    uint32_t since   = (g_energy_reset_unix > 0) ? g_energy_reset_unix : g_session_start_unix;
+    uint32_t elapsed = (now > since && since > 0) ? (now - since) : 0;
+
+    float hours   = (float)elapsed / 3600.0f;
+    float kw_avg  = (hours > 0.0f) ? (g_wh_total  / 1000.0f / hours) : 0.0f;
+    float kvar_avg= (hours > 0.0f) ? (g_varh_total / 1000.0f / hours) : 0.0f;
+
+    uint32_t days    = elapsed / 86400;
+    uint32_t hrs     = (elapsed % 86400) / 3600;
+    uint32_t mins    = (elapsed % 3600)  / 60;
+    uint32_t secs    = elapsed % 60;
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╔══ HT7017 Energy Summary ══╗");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Active Energy   : %.4f Wh  (%.4f kWh)",
+              g_wh_total, g_wh_total / 1000.0f);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Reactive Energy : %.4f VARh (%.4f kVARh)",
+              g_varh_total, g_varh_total / 1000.0f);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Session time    : %ud %02uh %02um %02us",
+              days, hrs, mins, secs);
+    if (hours > 0.0f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "  Avg Active Pwr  : %.2f W  (%.4f kW)",
+                  kw_avg * 1000.0f, kw_avg);
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "  Avg Reactive Pwr: %.2f VAR",
+                  kvar_avg * 1000.0f);
+    }
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  NTP now unix    : %u", now);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Reset at unix   : %u", g_energy_reset_unix);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  EP1 scale       : %.4f  (1 raw count = %.6f Wh)",
+              g_e1Scale, 1.0f / g_e1Scale);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  To reset        : HT7017_Energy_Reset");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╚═══════════════════════════╝");
+    return CMD_RES_OK;
+}
+
+// ── HT7017_Status (extended from v10) ────────────────────────────────────────
+static commandResult_t CMD_Status(const void *ctx, const char *cmd,
+                                   const char *args, int flags)
+{
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╔══ HT7017 v11 Status ══╗");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Voltage        : %.2f V",    g_voltage);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Current        : %.3f A",    g_current);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Active Power   : %.2f W",    g_power);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Reactive Power : %.2f VAR",  g_reactive);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Apparent (V*I) : %.2f VA",   g_apparent);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Apparent (S1)  : %.2f VA",   g_apparent_s1);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Power Factor   : %.4f",      g_power_factor);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Frequency      : %.3f Hz",   g_freq);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Active Energy  : %.4f Wh",   g_wh_total);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Reactive Energy: %.4f VARh", g_varh_total);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  PF Count raw   : %.0f",      g_pf_count_raw);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Scales  V=%.2f I=%.2f P=%.4f F=%.1f Q=%.4f S=%.4f",
+              g_vScale, g_iScale, g_pScale, g_fScale, g_qScale, g_sScale);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  EP1sc=%.4f  offset=%.0f",
+              g_e1Scale, g_iOffset);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Last raw V=%u I=%u P=%u",
+              g_lastRawV, g_lastRawI, g_lastRawP);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Frames  good=%u bad=%u miss=%u tx=%u",
+              g_goodFrames, g_badFrames, g_totalMisses, g_txCount);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╚════════════════════════╝");
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_Baud(const void *ctx, const char *cmd,
+                                 const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    int baud = atoi(args);
+    if (baud <= 0) return CMD_RES_BAD_ARGUMENT;
+    UART_InitUART(baud, HT7017_PARITY_EVEN, 0);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: UART re-init %d baud 8E1", baud);
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_NoParity(const void *ctx, const char *cmd,
+                                     const char *args, int flags)
+{
+    UART_InitUART(HT7017_BAUD_RATE, 0, 0);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: UART re-init %d baud 8N1", HT7017_BAUD_RATE);
+    return CMD_RES_OK;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION G — INIT / RUN (v10 structure unchanged, register count updated)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 void HT7017_Init(void)
 {
-    /* Per §2.2: wait ≥10ms after power-on before operating registers */
-    rtos_delay_milliseconds(15);
+    HT7017_BuildRegTable();
 
-    /* Send one write to ADCCON to trigger energy reliability mechanism (§3.11).
-     * Write the default value 0x0000 – this satisfies the requirement
-     * that MCU must write ADCCON at least once after reset before energy counts. */
-    ht7017_write_enable_low();
-    ht7017_write_reg(HT7017_REG_ADCCON, 0x00, 0x00);
-    ht7017_write_lock();
+    // Start on last slot so first increment lands on slot 0 (Voltage)
+    g_regIndex    = REG_TABLE_SIZE - 1;
+    g_missCount   = 0;
+    g_totalMisses = 0;
+    g_txCount     = 0;
+    g_goodFrames  = 0;
+    g_badFrames   = 0;
 
-    g_regIndex       = 0;
-    g_frameConsumed  = false;
-    g_waitingReply   = false;
-    g_rxLen          = 0;
-    g_epSeeded       = false;
-    g_eqSeeded       = false;
-    g_initialized    = true;
+    UART_InitReceiveRingBuffer(256);
+    UART_InitUART(HT7017_BAUD_RATE, HT7017_PARITY_EVEN, 0);
 
-    bk_printf("[HT7017] Init OK, femu=1MHz OSR=64, freq formula=500000/raw\r\n");
+    // v10 calibration commands
+    CMD_RegisterCommand("VoltageSet",          CMD_VoltageSet,  NULL);
+    CMD_RegisterCommand("CurrentSet",          CMD_CurrentSet,  NULL);
+    CMD_RegisterCommand("PowerSet",            CMD_PowerSet,    NULL);
+    // v11 energy commands
+    CMD_RegisterCommand("HT7017_Energy_Reset", CMD_EnergyReset, NULL);
+    CMD_RegisterCommand("HT7017_Energy",       CMD_Energy,      NULL);
+    // diagnostic
+    CMD_RegisterCommand("HT7017_Status",       CMD_Status,      NULL);
+    CMD_RegisterCommand("HT7017_Baud",         CMD_Baud,        NULL);
+    CMD_RegisterCommand("HT7017_NoParity",     CMD_NoParity,    NULL);
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017 v11: KWS-303WF  BK7231N->HT7017 direct  shunt");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017 v11: %s  4800 8E1  %u-slot rotation (%us cycle)",
+              CFG_HasFlag(26) ? "UART2" : "UART1 (P0/P1)",
+              REG_TABLE_SIZE, REG_TABLE_SIZE);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017 v11: V=%.2f I=%.2f P=%.4f F=%.1f offset=%.0f",
+              g_vScale, g_iScale, g_pScale, g_fScale, g_iOffset);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017 v11: Q=%.4f S=%.4f EP1=%.4f",
+              g_qScale, g_sScale, g_e1Scale);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017 v11: Ch V=%u I=%u P=%u F=%u PF=%u Q=%u S=%u Wh=%u VARh=%u",
+              HT7017_CHANNEL_VOLTAGE, HT7017_CHANNEL_CURRENT,
+              HT7017_CHANNEL_POWER,   HT7017_CHANNEL_FREQ,
+              HT7017_CHANNEL_PF,      HT7017_CHANNEL_REACTIVE,
+              HT7017_CHANNEL_APPARENT,HT7017_CHANNEL_WH,
+              HT7017_CHANNEL_VARH);
 }
 
-/*
- * HT7017_RunEverySecond() – call once per second from your task scheduler.
- * Sends the next read request to the HT7017 in the rotation.
- * Processes any outstanding reply first if available.
- */
 void HT7017_RunEverySecond(void)
 {
-    if (!g_initialized) return;
+    int available = UART_GetDataSize();
 
-    /* Drain any pending RX bytes into buffer */
-    while (UART1_ByteAvailable() && g_rxLen < sizeof(g_rxBuf)) {
-        g_rxBuf[g_rxLen++] = UART1_ReadByte();
+    if (available >= HT7017_RESPONSE_LEN) {
+        uint8_t d2 = UART_GetByte(0);
+        uint8_t d1 = UART_GetByte(1);
+        uint8_t d0 = UART_GetByte(2);
+        uint8_t cs = UART_GetByte(3);
+        UART_ConsumeBytes(HT7017_RESPONSE_LEN);   // consume AFTER reading
+
+        HT7017_ProcessFrame(d2, d1, d0, cs);
+        g_regIndex  = (g_regIndex + 1) % REG_TABLE_SIZE;
+        g_missCount = 0;
+
+    } else {
+        g_missCount++;
+        g_totalMisses++;
+
+        if (g_txCount > 0) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "HT7017: No response reg=0x%02X [%s] miss=%u",
+                      g_regTable[g_regIndex].reg,
+                      g_regTable[g_regIndex].name,
+                      g_missCount);
+        }
+
+        UART_ConsumeBytes(UART_GetDataSize());
+
+        if (g_missCount >= HT7017_MAX_MISS_COUNT) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "HT7017: %u misses on 0x%02X - skip",
+                      HT7017_MAX_MISS_COUNT, g_regTable[g_regIndex].reg);
+            g_regIndex  = (g_regIndex + 1) % REG_TABLE_SIZE;
+            g_missCount = 0;
+        }
     }
 
-    if (g_waitingReply && g_rxLen >= 4) {
-        uint8_t cur_reg = g_regTable[g_regIndex].reg;
-        ht7017_process_frame(cur_reg);
-        /* Advance index only if this slot was not already consumed by RunQuick */
-        if (!g_frameConsumed) {
-            /* frame processed normally */
-        }
-        g_regIndex = (g_regIndex + 1) % REG_TABLE_LEN;
-    } else if (g_waitingReply && !g_frameConsumed) {
-        /* Timeout – no reply; advance anyway to avoid stall */
-        uint32_t now = rtos_get_time();
-        if ((now - g_lastSendMs) > 200) {
-            bk_printf("[HT7017] timeout reg=%02X\r\n", g_regTable[g_regIndex].reg);
-            g_waitingReply  = false;
-            g_rxLen         = 0;
-            g_regIndex      = (g_regIndex + 1) % REG_TABLE_LEN;
-        }
-        return;  /* don't send yet */
-    } else if (g_frameConsumed) {
-        /* RunQuick already consumed this slot's frame – advance index */
-        g_frameConsumed = false;
-        g_regIndex = (g_regIndex + 1) % REG_TABLE_LEN;
-    }
-
-    /* Send request for next slot */
-    uint8_t next_reg = g_regTable[g_regIndex].reg;
-    ht7017_send_read(next_reg);
+    uint8_t reg = g_regTable[g_regIndex].reg;
+    HT7017_SendRequest(reg);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: TX > 6A %02X [%s] (tx=%u)",
+              reg, g_regTable[g_regIndex].name, g_txCount);
 }
 
-/*
- * HT7017_RunQuick() – call from UART RX interrupt or fast loop.
- * Processes any complete 4-byte frame that has arrived.
- * Does NOT advance g_regIndex (RunEverySecond owns that).
- */
 void HT7017_RunQuick(void)
 {
-    if (!g_initialized || !g_waitingReply) return;
-
-    while (UART1_ByteAvailable() && g_rxLen < sizeof(g_rxBuf)) {
-        g_rxBuf[g_rxLen++] = UART1_ReadByte();
-    }
-
-    if (g_rxLen >= 4) {
-        uint8_t cur_reg = g_regTable[g_regIndex].reg;
-        if (ht7017_process_frame(cur_reg)) {
-            /* g_frameConsumed is now true; RunEverySecond will see it */
-        }
-    }
+    if (UART_GetDataSize() < HT7017_RESPONSE_LEN) return;
+    uint8_t d2 = UART_GetByte(0);
+    uint8_t d1 = UART_GetByte(1);
+    uint8_t d0 = UART_GetByte(2);
+    uint8_t cs = UART_GetByte(3);
+    UART_ConsumeBytes(HT7017_RESPONSE_LEN);
+    HT7017_ProcessFrame(d2, d1, d0, cs);
+    // Do NOT advance g_regIndex — RunEverySecond manages rotation
 }
 
-/* ─────────────────────────────────────────────────────────
- * Getters
- * ───────────────────────────────────────────────────────── */
-float HT7017_GetVoltage(void)   { return g_voltage;    }
-float HT7017_GetCurrent(void)   { return g_current;    }
-float HT7017_GetPower(void)     { return g_power;      }
-float HT7017_GetReactive(void)  { return g_reactive;   }
-float HT7017_GetApparent(void)  { return g_apparent;   }
-float HT7017_GetFreq(void)      { return g_freq;       }
-float HT7017_GetEnergyWh(void)  { return g_energyWh;   }
-float HT7017_GetEnergyVARh(void){ return g_energyVARh; }
-
-float HT7017_GetPowerFactor(void)
-{
-    if (g_apparent < 0.001f) return 1.0f;
-    float pf = g_power / g_apparent;
-    if (pf >  1.0f) pf =  1.0f;
-    if (pf < -1.0f) pf = -1.0f;
-    return pf;
-}
-
-/* ─────────────────────────────────────────────────────────
- * Calibration commands
- *
- * These are called from your console/command handler.
- * Each command uses the last captured raw value from normal polling.
- *
- * IMPORTANT: calibration writes require write-enable first.
- * The scale is purely a software factor; we don't write GP1/GQ1/GS1
- * (gain registers) here – those are for hardware fine-tuning.
- * ───────────────────────────────────────────────────────── */
-
-/* VoltageSet <actual_vrms> */
-void HT7017_VoltageSet(float actual_v)
-{
-    if (actual_v <= 0.0f || g_lastRawV == 0) {
-        bk_printf("[HT7017] VoltageSet: no raw data yet\r\n");
-        return;
-    }
-    g_vScale = (float)g_lastRawV / actual_v;
-    g_voltage = actual_v;
-    bk_printf("[HT7017] VoltageSet: rawV=%lu actual=%.2fV => g_vScale=%.2f\r\n",
-              (unsigned long)g_lastRawV, actual_v, g_vScale);
-}
-
-/* CurrentSet <actual_arms> */
-void HT7017_CurrentSet(float actual_a)
-{
-    if (actual_a <= 0.0f || g_lastRawI == 0) {
-        bk_printf("[HT7017] CurrentSet: no raw data yet\r\n");
-        return;
-    }
-    /* Offset is whatever we read at zero-current – keep existing g_iOffset.
-     * Scale = (raw_at_load - offset) / actual_load */
-    int32_t net = g_lastRawI - g_iOffset;
-    if (net <= 0) {
-        bk_printf("[HT7017] CurrentSet: raw <= offset, increase load\r\n");
-        return;
-    }
-    g_iScale  = (float)net / actual_a;
-    g_current = actual_a;
-    bk_printf("[HT7017] CurrentSet: rawI=%ld offset=%ld net=%ld actual=%.3fA => g_iScale=%.2f\r\n",
-              (long)g_lastRawI, (long)g_iOffset, (long)net, actual_a, g_iScale);
-}
-
-/* CurrentOffsetSet – call with zero current load to capture noise floor */
-void HT7017_CurrentOffsetSet(void)
-{
-    g_iOffset = g_lastRawI;
-    g_current = 0.0f;
-    bk_printf("[HT7017] CurrentOffset set to %ld\r\n", (long)g_iOffset);
-}
-
-/* PowerSet <actual_watts> – also sets Q and S scale proportionally */
-void HT7017_PowerSet(float actual_w)
-{
-    if (actual_w <= 0.0f || g_lastRawP == 0) {
-        bk_printf("[HT7017] PowerSet: no raw data yet (use resistive load)\r\n");
-        return;
-    }
-    g_pScale  = (float)g_lastRawP / actual_w;
-    g_qScale  = g_pScale;             /* Q uses same counts-per-watt unit */
-    g_sScale  = fabsf(g_pScale);      /* S is always unsigned; strip any sign */
-    g_power   = actual_w;
-    bk_printf("[HT7017] PowerSet: rawP=%ld actual=%.2fW => g_pScale=%.2f\r\n",
-              (long)g_lastRawP, actual_w, g_pScale);
-}
-
-/* ReactiveSet <actual_var> – independent Q calibration (needs reactive load) */
-void HT7017_ReactiveSet(float actual_var)
-{
-    if (actual_var == 0.0f || g_lastRawQ == 0) {
-        bk_printf("[HT7017] ReactiveSet: no raw data or zero\r\n");
-        return;
-    }
-    g_qScale   = (float)g_lastRawQ / actual_var;
-    g_reactive = actual_var;
-    bk_printf("[HT7017] ReactiveSet: rawQ=%ld actual=%.2fVAR => g_qScale=%.2f\r\n",
-              (long)g_lastRawQ, actual_var, g_qScale);
-}
-
-/* EnergyReset – reset software accumulators (chip keeps counting) */
-void HT7017_EnergyReset(void)
-{
-    g_energyWh   = 0.0f;
-    g_energyVARh = 0.0f;
-    g_epSeeded   = false;
-    g_eqSeeded   = false;
-    bk_printf("[HT7017] Energy accumulators reset\r\n");
-}
-
-/* EnergyScaleSet <wh_per_count> – set after running a known load for 1h */
-void HT7017_EnergyScaleSet(float wh_per_count)
-{
-    if (wh_per_count <= 0.0f) return;
-    g_eScale  = wh_per_count;
-    g_eqScale = wh_per_count;
-    bk_printf("[HT7017] EnergyScale set to %.4f Wh/count\r\n", wh_per_count);
-}
-
-/* ─────────────────────────────────────────────────────────
- * Debug / status dump
- * ───────────────────────────────────────────────────────── */
-void HT7017_PrintStatus(void)
-{
-    bk_printf("[HT7017] V=%.2fV I=%.3fA P=%.2fW Q=%.2fVAR S=%.2fVA PF=%.3f F=%.2fHz\r\n",
-              g_voltage, g_current, g_power, g_reactive, g_apparent,
-              HT7017_GetPowerFactor(), g_freq);
-    bk_printf("[HT7017] Energy: %.4fWh  %.4fVARh\r\n", g_energyWh, g_energyVARh);
-    bk_printf("[HT7017] Scales: vScale=%.2f iScale=%.2f pScale=%.2f eScale=%.4f\r\n",
-              g_vScale, g_iScale, g_pScale, g_eScale);
-    bk_printf("[HT7017] Raw: V=%lu I=%ld P=%ld Q=%ld S=%ld offset=%ld\r\n",
-              (unsigned long)g_lastRawV, (long)g_lastRawI,
-              (long)g_lastRawP, (long)g_lastRawQ, (long)g_lastRawS,
-              (long)g_iOffset);
-}
-
-/* ─────────────────────────────────────────────────────────
- * Software reset (writes 0x55 to SRSTREG 0x33)
- * HT7017 resets; wait 10ms before re-initializing.
- * ───────────────────────────────────────────────────────── */
-void HT7017_SoftReset(void)
-{
-    /* SRSTREG is in low range (0x33) – needs WPEN_LOW unlock */
-    ht7017_write_enable_low();
-    ht7017_write_reg(HT7017_REG_SRSTREG, 0x00, 0x55);
-    /* No ACK expected (chip resets); wait for reboot */
-    rtos_delay_milliseconds(20);
-    bk_printf("[HT7017] Software reset issued\r\n");
-    HT7017_Init();
-}
-
-/* ─────────────────────────────────────────────────────────
- * Chip ID verification (useful for bring-up)
- * Expected: 0x7053F0  (ChipID register 0x1B)
- * ───────────────────────────────────────────────────────── */
-uint32_t HT7017_ReadChipID(void)
-{
-    ht7017_send_read(HT7017_REG_CHIP_ID);
-    rtos_delay_milliseconds(10);
-    while (UART1_ByteAvailable() && g_rxLen < sizeof(g_rxBuf)) {
-        g_rxBuf[g_rxLen++] = UART1_ReadByte();
-    }
-    if (g_rxLen >= 3) {
-        uint32_t id = decode_unsigned24(g_rxBuf[0], g_rxBuf[1], g_rxBuf[2]);
-        bk_printf("[HT7017] ChipID=0x%06lX (expect 0x7053F0)\r\n", (unsigned long)id);
-        g_rxLen        = 0;
-        g_waitingReply = false;
-        return id;
-    }
-    return 0;
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION H — HTTP PAGE (extended with all new measurements)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
 {
@@ -749,4 +891,24 @@ void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
             sizeof(request->reply) - strlen(request->reply) - 1);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION I — GETTERS (v10 unchanged, new ones appended)
+// ═══════════════════════════════════════════════════════════════════════════════
 
+float    HT7017_GetVoltage(void)        { return g_voltage;       }
+float    HT7017_GetCurrent(void)        { return g_current;       }
+float    HT7017_GetPower(void)          { return g_power;         }
+float    HT7017_GetFrequency(void)      { return g_freq;          }
+float    HT7017_GetPowerFactor(void)    { return g_power_factor;  }
+float    HT7017_GetApparentPower(void)  { return g_apparent;      }
+uint32_t HT7017_GetGoodFrames(void)     { return g_goodFrames;    }
+uint32_t HT7017_GetBadFrames(void)      { return g_badFrames;     }
+uint32_t HT7017_GetTxCount(void)        { return g_txCount;       }
+uint32_t HT7017_GetMissCount(void)      { return g_totalMisses;   }
+// v11 new getters
+float    HT7017_GetReactivePower(void)  { return g_reactive;      }
+float    HT7017_GetApparentS1(void)     { return g_apparent_s1;   }
+float    HT7017_GetWh(void)             { return g_wh_total;      }
+float    HT7017_GetVARh(void)           { return g_varh_total;    }
+
+#endif // ENABLE_DRIVER_HT7017
