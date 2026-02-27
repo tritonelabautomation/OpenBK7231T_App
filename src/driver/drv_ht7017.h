@@ -4,7 +4,7 @@
 
 /*
  * ╔══════════════════════════════════════════════════════════════════════════════╗
- * ║         HT7017 Energy Metering IC — Driver for KWS-303WF  v14             ║
+ * ║         HT7017 Energy Metering IC — Driver for KWS-303WF  v15             ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
  * ║  DEVICE  : KWS-303WF Smart Energy Meter                                   ║
  * ║  SOC     : BK7231N CBU module                                              ║
@@ -42,57 +42,63 @@
  * ║  ⚠ P1/Q1 SIGNED: raw 0xFFFFFF = -1 = ~0W (not 16,777,215!)              ║
  * ║                                                                            ║
  * ║  EMUSR register 0x19 — EMU status bits (datasheet §5.1):                  ║
- * ║    Bit 0: OVERVOLTAGE flag — set when URMS > OV threshold                 ║
- * ║    Bit 1: UNDERVOLTAGE flag — set when URMS < UV threshold                ║
- * ║    Bit 2: OVERCURRENT flag — set when I1RMS > OC threshold                ║
- * ║    Bit 3: OVERPOWER flag — set when P1 > OP threshold                    ║
- * ║    Bit 4: ZXLOSS flag — zero-crossing loss detection                     ║
- * ║    Bit 5–7: reserved                                                      ║
- * ║    NOTE: EMUSR reflects the IC's internal comparators. These are          ║
- * ║    read-only status bits. Threshold registers are NOT accessible via      ║
- * ║    the UART read protocol — thresholds are set internally by the IC       ║
- * ║    at power-on from OTP/config. Application-level protection (OVP/UVP/   ║
- * ║    OCP/OPP) is therefore implemented in firmware by comparing measured    ║
- * ║    values against user-configurable thresholds and tripping the relay.    ║
+ * ║    Bit 0: OVERVOLTAGE  Bit 1: UNDERVOLTAGE  Bit 2: OVERCURRENT            ║
+ * ║    Bit 3: OVERPOWER    Bit 4: ZXLOSS        Bits 5-7: reserved            ║
+ * ║    NOTE: read-only status. Thresholds are OTP — cannot be set via UART.   ║
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
- * ║  v13 TWO-SPEED POLLING (unchanged)                                        ║
+ * ║  v15 TWO-SPEED POLLING                                                    ║
  * ║                                                                            ║
- * ║  FAST table — V, I, P1 — polled on 4 out of every 5 calls:               ║
- * ║    Each fast register updated every ~1.7s                                 ║
+ * ║  FAST table — V, I, P, FREQ (4 registers):                                ║
+ * ║    Polled 4 out of every 5 calls → each updated every ~1.25s              ║
+ * ║    FREQ moved from slow to fast — was 30s, now 1.25s (FIX #1)            ║
  * ║                                                                            ║
- * ║  SLOW table — Q1, S1, FREQ, EP1, EQ1, EMUSR — 1 out of every 5 calls:   ║
- * ║    Each slow register updated every 30s   (5 calls × 6 registers)         ║
+ * ║  SLOW table — Q, S, EP1, EQ1, EMUSR (5 registers):                       ║
+ * ║    Polled 1 out of every 5 calls → each updated every 25s                 ║
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
- * ║  v14 ADDITIONS                                                             ║
+ * ║  v15 FIXES over v14                                                        ║
  * ║                                                                            ║
- * ║  1. POWER FACTOR — computed every fast cycle, not just when S1 updates:  ║
- * ║     PF = P1 / (V*I) always. When S1 is fresh (<60s), cross-check with    ║
- * ║     S1. Channel published after every V/I/P fast poll.                    ║
+ * ║  FIX 1 — FREQ moved to fast table                                         ║
+ * ║    Was: slow table slot S2 → updated every 30s                            ║
+ * ║    Now: fast table slot F3 → updated every ~1.25s                         ║
+ * ║    FAST_TABLE_SIZE 3→4.  SLOW_TABLE_SIZE 6→5 (FREQ removed from slow).   ║
  * ║                                                                            ║
- * ║  2. EMUSR POLLING — 0x19 added to SLOW table. On each read, status bits  ║
- * ║     decoded and published to channel HT7017_CHANNEL_EMUSR. Individual    ║
- * ║     alarm channels also published (OV, UV, OC, OP).                      ║
+ * ║  FIX 2 — Hysteresis now actually applied in EvaluateProtection()          ║
+ * ║    v14 defined HYSTERESIS macros but never used them — relay chatters at  ║
+ * ║    the threshold boundary. v15 uses separate trip/clear thresholds:       ║
+ * ║      Trip  when value > threshold                                          ║
+ * ║      Clear when value < threshold - hysteresis  (OV/OC/OP)               ║
+ * ║      Clear when value > threshold + hysteresis  (UV)                      ║
  * ║                                                                            ║
- * ║  3. SOFTWARE PROTECTION — configurable thresholds with hysteresis:        ║
- * ║     OverVoltage: trip relay if V > g_ovThreshold  (default 0 = disabled)  ║
- * ║     UnderVoltage: trip relay if V < g_uvThreshold (default 0 = disabled)  ║
- * ║     OverCurrent: trip relay if I > g_ocThreshold  (default 0 = disabled)  ║
- * ║     OverPower:   trip relay if P > g_opThreshold  (default 0 = disabled)  ║
- * ║     All thresholds 0 = disabled (safe default for unconfigured device)    ║
- * ║     Trip action: CMD_ExecuteCommand("setChannel <relay_ch> 0", 0)         ║
- * ║     Recovery: auto-recover after HT7017_PROT_RECOVER_SECONDS if           ║
- * ║               measurement returns to safe range (default 30s).            ║
- * ║     UV special: only trip if V > 10V (avoid false trip at power-off).     ║
+ * ║  FIX 3 — Channel scaling made consistent                                  ║
+ * ║    All channels now use the same ×100 integer convention:                 ║
+ * ║      FREQ:  50.12 Hz  → setChannel 13 5012  (use ReadOnly, display /100) ║
+ * ║      PF:    0.95      → setChannel 14 95    (use PowerFactor_div100)      ║
+ * ║      EMUSR: bitmask 3 → setChannel 19 300   (×100 like all others)        ║
+ * ║      ALARM: state 2   → setChannel 20 2     (raw int, NOT ×100)           ║
+ * ║    Alarm channel publishes raw 0-4 (not ×100) — it is a state code,      ║
+ * ║    not a measurement. Rules read it as: if ch20 == 1 (OV), etc.           ║
  * ║                                                                            ║
- * ║  4. CONSOLE COMMANDS (new in v14):                                        ║
- * ║     HT7017_SetOV <V>    set overvoltage threshold (0=disable)             ║
- * ║     HT7017_SetUV <V>    set undervoltage threshold (0=disable)            ║
- * ║     HT7017_SetOC <A>    set overcurrent threshold (0=disable)             ║
- * ║     HT7017_SetOP <W>    set overpower threshold (0=disable)               ║
- * ║     HT7017_SetRelayChannel <ch>  which channel is the relay (default 1)   ║
- * ║     HT7017_ProtStatus   show current protection config + alarm state      ║
+ * ║  FIX 4 — Recovery call-count formula corrected                            ║
+ * ║    v14: recover_calls = RECOVER_SECONDS * 4 / 5  (wrong, ~20% short)     ║
+ * ║    v15: recover_calls = RECOVER_SECONDS          (g_callCount = 1/second) ║
+ * ║                                                                            ║
+ * ║  FIX 5 — Misleading g_callCount comment removed                           ║
+ * ║                                                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════════╣
+ * ║  AUTOEXEC CHANNEL TYPES (copy into autoexec.bat)                          ║
+ * ║    setChannelType 10 voltage_div10          // Voltage (V)                ║
+ * ║    setChannelType 11 current_div1000        // Current (A)                ║
+ * ║    setChannelType 12 power_div10            // Power (W)                  ║
+ * ║    setChannelType 13 ReadOnly               // Frequency (÷100 = Hz)      ║
+ * ║    setChannelType 14 PowerFactor_div100     // Power Factor               ║
+ * ║    setChannelType 15 ReadOnly               // Reactive power (VAR)       ║
+ * ║    setChannelType 16 ReadOnly               // Apparent power (VA)        ║
+ * ║    setChannelType 17 EnergyTotal_kWh_div1000 // Active energy (Wh×1000)  ║
+ * ║    setChannelType 18 ReadOnly               // Reactive energy (VARh)     ║
+ * ║    setChannelType 19 ReadOnly               // EMUSR bitmask (÷100)       ║
+ * ║    setChannelType 20 ReadOnly               // Alarm state 0-4            ║
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
  * ║  CALIBRATION HISTORY                                                       ║
@@ -108,7 +114,7 @@
  * ║  CONSOLE COMMANDS                                                          ║
  * ║    VoltageSet <V>          recalibrate voltage scale (runtime)             ║
  * ║    CurrentSet <A>          recalibrate current scale (runtime)             ║
- * ║    PowerSet <W>            recalibrate power scale (runtime)               ║
+ * ║    PowerSet <W>            recalibrate power + Q + S scales (runtime)     ║
  * ║    HT7017_Status           full measurement + scale dump                  ║
  * ║    HT7017_Energy           kWh, kVARh, session time (NTP)                 ║
  * ║    HT7017_Energy_Reset     zero energy counters, record NTP timestamp     ║
@@ -137,87 +143,100 @@
 #define HT7017_FRAME_HEAD           0x6A
 #define HT7017_RESPONSE_LEN         4
 
-// ─── Register addresses — verified against datasheet Rev1.3 §5.1 ─────────────
+// ─── Register addresses ───────────────────────────────────────────────────────
 #define HT7017_REG_RMS_I1           0x06
 #define HT7017_REG_RMS_U            0x08
 #define HT7017_REG_FREQ             0x09
-#define HT7017_REG_POWER_P1         0x0A    // SIGNED — active power ch1
-#define HT7017_REG_POWER_Q1         0x0B    // SIGNED — reactive power ch1
-#define HT7017_REG_POWER_S1         0x0C    // unsigned — apparent power ch1
-#define HT7017_REG_EP1              0x0D    // unsigned — active energy accumulator
-#define HT7017_REG_EQ1              0x0E    // unsigned — reactive energy accumulator
-// 0x10 = PowerP2 per datasheet — NOT a PFCNT register. Not polled.
-#define HT7017_REG_EMUSR            0x19    // EMU status flags (bit-field)
+#define HT7017_REG_POWER_P1         0x0A    // SIGNED
+#define HT7017_REG_POWER_Q1         0x0B    // SIGNED
+#define HT7017_REG_POWER_S1         0x0C
+#define HT7017_REG_EP1              0x0D
+#define HT7017_REG_EQ1              0x0E
+#define HT7017_REG_EMUSR            0x19
 
 // ─── EMUSR bit positions ──────────────────────────────────────────────────────
-#define HT7017_EMUSR_BIT_OV         (1u << 0)   // overvoltage
-#define HT7017_EMUSR_BIT_UV         (1u << 1)   // undervoltage
-#define HT7017_EMUSR_BIT_OC         (1u << 2)   // overcurrent
-#define HT7017_EMUSR_BIT_OP         (1u << 3)   // overpower
-#define HT7017_EMUSR_BIT_ZXLOSS     (1u << 4)   // zero-crossing loss
+#define HT7017_EMUSR_BIT_OV         (1u << 0)
+#define HT7017_EMUSR_BIT_UV         (1u << 1)
+#define HT7017_EMUSR_BIT_OC         (1u << 2)
+#define HT7017_EMUSR_BIT_OP         (1u << 3)
+#define HT7017_EMUSR_BIT_ZXLOSS     (1u << 4)
 
 // ─── Calibrated scale factors (10-point calibration 2026-02-23) ──────────────
 #define HT7017_DEFAULT_VOLTAGE_SCALE    10961.98f
 #define HT7017_DEFAULT_CURRENT_SCALE    1661.41f
 #define HT7017_DEFAULT_POWER_SCALE      -3.1777f
-
-// FREQ: g_fScale is the numerator constant. Formula: freq = g_fScale / raw
-// Datasheet §5.1.2.4: Frequency = (femu×32)/(OSR×raw), femu=1MHz, OSR=64 → 500000/raw
+// FREQ: freq = HT7017_DEFAULT_FREQ_SCALE / raw  (datasheet §5.1.2.4)
 #define HT7017_DEFAULT_FREQ_SCALE       500000.0f
-
-// Current shunt DC offset — raw counts at zero current
 #define HT7017_CURRENT_OFFSET           440.0f
 
-// ─── v11 scale factors (unchanged) ───────────────────────────────────────────
+// ─── Derived scale defaults ───────────────────────────────────────────────────
 #define HT7017_DEFAULT_REACTIVE_SCALE   HT7017_DEFAULT_POWER_SCALE
 #define HT7017_DEFAULT_APPARENT_SCALE   1.0f
 #define HT7017_DEFAULT_EP1_SCALE        1.0f
 
-// ─── v13 two-speed scheduling (SLOW table now has 6 entries: +EMUSR) ─────────
-// With FAST_RATIO=5: 4 fast polls per 5 calls, 1 slow poll per 5 calls.
-//   Fast (V,I,P): each polled every ~1.7s
-//   Slow (Q,S,F,EP1,EQ1,EMUSR): each polled every 30s (5 calls × 6 registers)
+// ─── Two-speed scheduling ─────────────────────────────────────────────────────
+// FAST_RATIO=5: 4 fast polls per 5 calls, 1 slow poll per 5 calls.
+//
+//   FAST table (4 registers: V, I, P, FREQ):
+//     Each register polled every  5 × 1 / 4 = 1.25 s
+//
+//   SLOW table (5 registers: Q, S, EP1, EQ1, EMUSR):
+//     Each register polled every  5 × 5     = 25 s
+//
 #define HT7017_FAST_RATIO           5
 
-// ─── S1 freshness window for PF cross-check ───────────────────────────────────
-// If S1 was last updated more than this many seconds ago, PF uses V*I only.
+// ─── S1 freshness tracking (for HTTP diagnostic only) ────────────────────────
 #define HT7017_S1_STALE_SECONDS     90
 
-// ─── Software protection defaults (0 = disabled) ─────────────────────────────
-#define HT7017_DEFAULT_OV_THRESHOLD     0.0f    // V  — set via HT7017_SetOV
-#define HT7017_DEFAULT_UV_THRESHOLD     0.0f    // V  — set via HT7017_SetUV
-#define HT7017_DEFAULT_OC_THRESHOLD     0.0f    // A  — set via HT7017_SetOC
-#define HT7017_DEFAULT_OP_THRESHOLD     0.0f    // W  — set via HT7017_SetOP
-#define HT7017_UV_MIN_VOLTAGE           10.0f   // V  — don't trip UV if V < this (power-off)
-#define HT7017_PROT_RECOVER_SECONDS     30      // seconds before auto-recovery attempt
-#define HT7017_PROT_TRIP_HYSTERESIS_V   2.0f    // V  — OV/UV hysteresis band
-#define HT7017_PROT_TRIP_HYSTERESIS_A   0.1f    // A  — OC hysteresis band
-#define HT7017_PROT_TRIP_HYSTERESIS_W   5.0f    // W  — OP hysteresis band
+// ─── Software protection thresholds (0 = disabled) ───────────────────────────
+#define HT7017_DEFAULT_OV_THRESHOLD     0.0f    // V
+#define HT7017_DEFAULT_UV_THRESHOLD     0.0f    // V
+#define HT7017_DEFAULT_OC_THRESHOLD     0.0f    // A
+#define HT7017_DEFAULT_OP_THRESHOLD     0.0f    // W
+
+// UV guard — undervoltage only trips if V is above this value.
+// Prevents false trips at power-off / startup before line is live.
+#define HT7017_UV_MIN_VOLTAGE           10.0f   // V
+
+// Auto-recovery: relay is re-enabled this many seconds after fault clears.
+// g_callCount increments once per second so this is a direct second count.
+#define HT7017_PROT_RECOVER_SECONDS     30
+
+// Hysteresis bands — FIX 2: actually applied in EvaluateProtection()
+//   OV trip at threshold,    clear at threshold - HYS_V
+//   UV trip at threshold,    clear at threshold + HYS_V
+//   OC trip at threshold,    clear at threshold - HYS_A
+//   OP trip at threshold,    clear at threshold - HYS_W
+#define HT7017_PROT_HYSTERESIS_V        2.0f    // V
+#define HT7017_PROT_HYSTERESIS_A        0.1f    // A
+#define HT7017_PROT_HYSTERESIS_W        5.0f    // W
 
 // ─── OpenBeken channel mapping ────────────────────────────────────────────────
-#define HT7017_CHANNEL_VOLTAGE      10
-#define HT7017_CHANNEL_CURRENT      11
-#define HT7017_CHANNEL_POWER        12
-#define HT7017_CHANNEL_FREQ         13
-#define HT7017_CHANNEL_PF           14
-#define HT7017_CHANNEL_REACTIVE     15
-#define HT7017_CHANNEL_APPARENT     16
-#define HT7017_CHANNEL_WH           17   // published as Wh * 1000
-#define HT7017_CHANNEL_VARH         18   // published as VARh * 1000
-#define HT7017_CHANNEL_EMUSR        19   // raw EMUSR bitmask (0–31)
-#define HT7017_CHANNEL_ALARM        20   // 0=OK, 1=OV, 2=UV, 3=OC, 4=OP (SW prot)
+// All measurement channels published as (float_value × 100) integer.
+// ALARM channel is the exception — published as raw state code 0-4.
+// See AUTOEXEC CHANNEL TYPES in the header comment for setChannelType values.
+#define HT7017_CHANNEL_VOLTAGE      10   // V    ×100  → voltage_div100
+#define HT7017_CHANNEL_CURRENT      11   // A    ×100  → current_div100 (or _div1000 with scale adj)
+#define HT7017_CHANNEL_POWER        12   // W    ×100  → power_div100
+#define HT7017_CHANNEL_FREQ         13   // Hz   ×100  → ReadOnly (display ÷100)
+#define HT7017_CHANNEL_PF           14   // 0-1  ×100  → PowerFactor_div100
+#define HT7017_CHANNEL_REACTIVE     15   // VAR  ×100  → ReadOnly
+#define HT7017_CHANNEL_APPARENT     16   // VA   ×100  → ReadOnly
+#define HT7017_CHANNEL_WH           17   // Wh   ×1000 → EnergyTotal_kWh_div1000
+#define HT7017_CHANNEL_VARH         18   // VARh ×1000 → ReadOnly
+#define HT7017_CHANNEL_EMUSR        19   // bits ×100  → ReadOnly (÷100 = raw bitmask)
+#define HT7017_CHANNEL_ALARM        20   // 0-4  raw   → ReadOnly (0=OK 1=OV 2=UV 3=OC 4=OP)
 
 // ─── Behaviour ────────────────────────────────────────────────────────────────
 #define HT7017_MAX_MISS_COUNT       3
 
-// ─── Relay channel for software protection (user-configurable at runtime) ─────
-// Default channel 1. Override with HT7017_SetRelayChannel command.
+// ─── Default relay channel for software protection ────────────────────────────
 #define HT7017_DEFAULT_RELAY_CHANNEL    1
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 void     HT7017_Init(void);
 void     HT7017_RunQuick(void);
-void     HT7017_RunEverySecond(void);   // unchanged name — OpenBeken calls this
+void     HT7017_RunEverySecond(void);
 void     HT7017_AppendInformationToHTTPIndexPage(http_request_t *request);
 
 float    HT7017_GetVoltage(void);
