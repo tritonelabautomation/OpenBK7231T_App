@@ -590,9 +590,9 @@ static void energy_draw_screen(float v, float a, float w,
     /* TGSPDCL CAT-2B rate applied to session kWh */
     float cost = session_kwh * g_ev_rate_rs;
     if (cost < 1000.0f)
-        snprintf(buf, sizeof(buf), "₹%3.3f", cost);
+        snprintf(buf, sizeof(buf), "Rs%3.3f", cost);
     else
-        snprintf(buf, sizeof(buf), "₹%3.1f", cost);
+        snprintf(buf, sizeof(buf), "RS%3.1f", cost);
     if (strcmp(buf, g_prev_cost) != 0) {
         strncpy(g_prev_cost, buf, sizeof(g_prev_cost) - 1);
         energy_update_zone(0, ROW_COST_Y, SML_FULL_W, ROW_COST_H, buf, ST7735_GREEN, VAL_S);
@@ -654,12 +654,12 @@ static void energy_fire_relay(uint8_t turn_on)
 {
     if (turn_on) {
         CHANNEL_Set(RELAY_CH_ON,  1, 0);
-        ST7735_Delay(100);               /* 50ms pulse — required for latching coil */
+        ST7735_Delay(200);               /* 50ms pulse — required for latching coil */
         CHANNEL_Set(RELAY_CH_ON,  0, 0);
         g_relay_state = 1;
     } else {
         CHANNEL_Set(RELAY_CH_OFF, 1, 0);
-        ST7735_Delay(100);               /* 50ms pulse — required for latching coil */
+        ST7735_Delay(200);               /* 50ms pulse — required for latching coil */
         CHANNEL_Set(RELAY_CH_OFF, 0, 0);
         g_relay_state = 0;
     }
