@@ -8,14 +8,14 @@
  * ┌─────────────────────────────────────────────────────────────┐
  * │  DISPLAY LAYOUT  80×160px                                   │
  * │                                                             │
- * │  Y=  0 h=10  OFF      NoWF    ← GREY         GREY          │
- * │  Y= 11 h=29  221.5         V  ← RED   scale2               │
- * │  Y= 40 h=29  0.55          A  ← CYAN  scale2               │
- * │  Y= 69 h=29  121.7         W  ← YELLOW scale2              │
- * │  Y= 98 h=15  000.47kWh        ← CYAN  scale1               │
- * │  Y=113 h=15  Rs   3.76        ← GREEN scale1  (EV cost)     │
- * │  Y=128 h=15  0.20PF  49.9Hz   ← RED | BLUE scale1          │
- * │  Y=143 h=17  27.16C  01:23    ← ORANGE | WHITE scale1 split │
+ * │  Y=  0 h=  OFF      NoWF    ← GREY         GREY          │
+ * │  Y=  h=  221.5         V  ← RED   scale2               │
+ * │  Y=  h=  0.55          A  ← CYAN  scale2               │
+ * │  Y=  h=  121.7         W  ← YELLOW scale2              │
+ * │  Y= h=  Rs   3.76        ← GREEN scale1  (EV cost)       │
+ * │  Y=  h=  000.47kWh        ← CYAN  scale1               │
+ * │  Y= h=  0.20PF  49.9Hz   ← RED | BLUE scale1          │
+ * │  Y= h=  27.16C  01:23    ← ORANGE | WHITE scale1 split │
  * └─────────────────────────────────────────────────────────────┘
  *
  * PIXEL SUM: 10+1+29+29+29+15+15+15+17 = 160px ✓
@@ -447,13 +447,13 @@ static void btn_tick(void)
 #define ROW_A_H        24
 #define ROW_W_Y        59      /* 40+29 */
 #define ROW_W_H        24
-#define ROW_KWH_Y      83      /* 69+29 */
+#define ROW_COST_Y     83      /* 98+15 */
+#define ROW_COST_H     23
+#define ROW_KWH_Y     106      /* 69+29 */
 #define ROW_KWH_H      18
-#define ROW_COST_Y    101      /* 98+15 */
-#define ROW_COST_H     22
-#define ROW_PFHZ_Y    123      /* 113+15 */
+#define ROW_PFHZ_Y    124      /* 113+15 */
 #define ROW_PFHZ_H     18
-#define ROW_TEMPTMR_Y 141      /* 128+15 */
+#define ROW_TEMPTMR_Y 142      /* 128+15 */
 #define ROW_TEMPTMR_H  18      /* 143+17=160 ✓ */
 
 #define VAL_S   2    /* large scale: 12px/ch wide, 14px tall */
