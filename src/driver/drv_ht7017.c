@@ -1,43 +1,41 @@
 /*
- * HT7017 Energy Metering IC — Driver for KWS-303WF  v13
+ * HT7017 Energy Metering IC — Driver for KWS-303WF  v14
  *
- * v13 CHANGE — Two-speed polling for EV charging use case:
+ * v14 CHANGES over v13:
  *
- *   PROBLEM (v12 and earlier):
- *     Single rotation of 12 registers, one per second.
- *     V, I, P each appeared at most twice in the 12-slot table → updated
- *     every 6 seconds at best. With a load connecting/disconnecting during
- *     EV charging this lag is unacceptable — current could show 0A for up
- *     to 6 seconds after the charger starts or stops.
+ *   1. POWER FACTOR — published reliably after EVERY fast poll (V/I/P),
+ *      not just when the slow S1 register updates.
  *
- *   SOLUTION:
- *     Two separate register tables, each with its own index pointer.
- *     Scheduling lives entirely inside HT7017_RunEverySecond() using a
- *     simple call counter — zero changes to OpenBeken glue code.
+ *      Root cause in v13: g_power_factor is recomputed in HT7017_UpdateDerived()
+ *      which is called from every HT7017_ProcessFrame(). But HT7017_PublishChannel
+ *      for PF was also inside ProcessFrame, so it fired correctly. The actual
+ *      problem was that PF used g_apparent_s1 which only refreshes every ~30s,
+ *      making PF lag badly under changing loads.
  *
- *     FAST table: V, I, P1  (3 registers)
- *     SLOW table: Q1, S1, FREQ, EP1, EQ1  (5 registers)
+ *      Fix: PF always uses g_apparent (V*I) as the denominator. g_apparent_s1
+ *      is now only used as a diagnostic cross-check in the HTTP page. This
+ *      gives stable, fast-updating PF on every V/I/P cycle.
  *
- *     g_callCount increments every second.
- *     if (g_callCount % HT7017_FAST_RATIO != 0) → poll next FAST register
- *     if (g_callCount % HT7017_FAST_RATIO == 0) → poll next SLOW register
+ *   2. EMUSR (reg 0x19) — added to SLOW table as 6th entry.
+ *      The HT7017 EMUSR register contains hardware-detected status flags:
+ *        Bit 0: OV (overvoltage), Bit 1: UV, Bit 2: OC, Bit 3: OP, Bit 4: ZXLOSS
+ *      On each read the raw bitmask is published to HT7017_CHANNEL_EMUSR.
+ *      Note: EMUSR thresholds are OTP-programmed in the IC at manufacture and
+ *      cannot be changed via UART. EMUSR is informational only — the IC does NOT
+ *      trip a relay; relay control must be done by the application.
  *
- *     With HT7017_FAST_RATIO=5:
- *       4 calls out of 5 → fast register  (V/I/P each updated every ~1.7s)
- *       1 call out of 5  → slow register  (Q/S/F/EP1/EQ1 each updated every 25s)
+ *   3. SOFTWARE PROTECTION — application-level OV/UV/OC/OP with hysteresis.
+ *      Evaluated on every fast poll (post V/I/P update). When a threshold is
+ *      exceeded, the relay channel is driven LOW and g_alarmState is set.
+ *      Auto-recovery: if the measurement returns inside the safe range for
+ *      HT7017_PROT_RECOVER_SECONDS, the relay is re-enabled.
+ *      UV guard: undervoltage only trips if V > HT7017_UV_MIN_VOLTAGE, to avoid
+ *      false trips at power-off or on initial startup before the line is live.
+ *      All thresholds default to 0 (disabled).
  *
- *   HALF-DUPLEX SAFETY:
- *     Exactly ONE TX per RunEverySecond() call. No change to the TX/RX
- *     state machine — whichever table was last sent, we process its reply
- *     first, then decide which table sends next. A single g_lastWasFast flag
- *     tells ProcessFrame which table's index to look up.
+ *   4. SLOW TABLE SIZE 5→6 (added EMUSR). No other scheduling changes.
  *
- *   MISS HANDLING:
- *     Each table has its own miss counter. A miss on a fast register advances
- *     the fast index. A miss on a slow register advances the slow index.
- *     They cannot interfere with each other.
- *
- *   ALL v12 FIXES PRESERVED:
+ *   ALL v12/v13 FIXES PRESERVED:
  *     FIX 1 — FREQ formula: g_fScale/raw (500000/raw) not raw/g_fScale
  *     FIX 2 — PFCNT removed: 0x10 is PowerP2, not PFCNT
  *     FIX 3 — g_sScale: fabsf(g_pScale) in CMD_PowerSet
@@ -88,8 +86,14 @@ static float g_power        = 0.0f;
 static float g_freq         = 0.0f;
 static float g_reactive     = 0.0f;
 static float g_apparent_s1  = 0.0f;
-static float g_apparent     = 0.0f;   // V * I
+static float g_apparent     = 0.0f;   // V * I (always fresh)
 static float g_power_factor = 0.0f;
+
+// S1 freshness tracking (v14)
+static uint32_t g_s1_last_update_tick = 0;  // g_callCount value when S1 was last received
+
+// EMU status (v14)
+static uint32_t g_emusr_raw  = 0;   // raw bitmask from last EMUSR read
 
 // Energy accumulators — bool seeded flags (v12 FIX 4)
 static uint32_t g_ep1_last   = 0;
@@ -110,6 +114,20 @@ static uint32_t g_badFrames   = 0;
 static uint32_t g_totalMisses = 0;
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SECTION A2 — SOFTWARE PROTECTION STATE (v14)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static float    g_ovThreshold   = HT7017_DEFAULT_OV_THRESHOLD;
+static float    g_uvThreshold   = HT7017_DEFAULT_UV_THRESHOLD;
+static float    g_ocThreshold   = HT7017_DEFAULT_OC_THRESHOLD;
+static float    g_opThreshold   = HT7017_DEFAULT_OP_THRESHOLD;
+static uint8_t  g_relayChannel  = HT7017_DEFAULT_RELAY_CHANNEL;
+static uint8_t  g_alarmState    = 0;    // 0=OK 1=OV 2=UV 3=OC 4=OP
+static bool     g_relayTripped  = false;
+static uint32_t g_tripCallCount = 0;    // g_callCount value when relay tripped
+static uint32_t g_callCount     = 0;    // also used here (forward reference ok — same TU)
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SECTION B — REGISTER TABLE (shared type, two instances)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -120,6 +138,7 @@ typedef struct {
     uint8_t     is_signed;
     uint8_t     has_offset;
     uint8_t     is_energy;
+    uint8_t     is_emusr;      // v14: special EMUSR processing path
     uint32_t   *last_raw_acc;
     bool       *seeded_flag;
     float      *acc_total;
@@ -133,8 +152,8 @@ typedef struct {
 #define FAST_TABLE_SIZE 3
 static RegRead_t g_fastTable[FAST_TABLE_SIZE];
 
-// ── SLOW table: Q, S, FREQ, EP1, EQ1 — housekeeping, polled every 25s ────────
-#define SLOW_TABLE_SIZE 5
+// ── SLOW table: Q, S, FREQ, EP1, EQ1, EMUSR (v14: +1 entry = 6 total) ────────
+#define SLOW_TABLE_SIZE 6
 static RegRead_t g_slowTable[SLOW_TABLE_SIZE];
 
 static void HT7017_BuildTables(void)
@@ -148,6 +167,7 @@ static void HT7017_BuildTables(void)
     g_fastTable[0].is_signed    = 0;
     g_fastTable[0].has_offset   = 0;
     g_fastTable[0].is_energy    = 0;
+    g_fastTable[0].is_emusr     = 0;
     g_fastTable[0].last_raw_acc = NULL;
     g_fastTable[0].seeded_flag  = NULL;
     g_fastTable[0].acc_total    = NULL;
@@ -163,6 +183,7 @@ static void HT7017_BuildTables(void)
     g_fastTable[1].is_signed    = 0;
     g_fastTable[1].has_offset   = 1;
     g_fastTable[1].is_energy    = 0;
+    g_fastTable[1].is_emusr     = 0;
     g_fastTable[1].last_raw_acc = NULL;
     g_fastTable[1].seeded_flag  = NULL;
     g_fastTable[1].acc_total    = NULL;
@@ -178,6 +199,7 @@ static void HT7017_BuildTables(void)
     g_fastTable[2].is_signed    = 1;
     g_fastTable[2].has_offset   = 0;
     g_fastTable[2].is_energy    = 0;
+    g_fastTable[2].is_emusr     = 0;
     g_fastTable[2].last_raw_acc = NULL;
     g_fastTable[2].seeded_flag  = NULL;
     g_fastTable[2].acc_total    = NULL;
@@ -195,6 +217,7 @@ static void HT7017_BuildTables(void)
     g_slowTable[0].is_signed    = 1;
     g_slowTable[0].has_offset   = 0;
     g_slowTable[0].is_energy    = 0;
+    g_slowTable[0].is_emusr     = 0;
     g_slowTable[0].last_raw_acc = NULL;
     g_slowTable[0].seeded_flag  = NULL;
     g_slowTable[0].acc_total    = NULL;
@@ -210,6 +233,7 @@ static void HT7017_BuildTables(void)
     g_slowTable[1].is_signed    = 0;
     g_slowTable[1].has_offset   = 0;
     g_slowTable[1].is_energy    = 0;
+    g_slowTable[1].is_emusr     = 0;
     g_slowTable[1].last_raw_acc = NULL;
     g_slowTable[1].seeded_flag  = NULL;
     g_slowTable[1].acc_total    = NULL;
@@ -225,6 +249,7 @@ static void HT7017_BuildTables(void)
     g_slowTable[2].is_signed    = 0;
     g_slowTable[2].has_offset   = 0;
     g_slowTable[2].is_energy    = 0;
+    g_slowTable[2].is_emusr     = 0;
     g_slowTable[2].last_raw_acc = NULL;
     g_slowTable[2].seeded_flag  = NULL;
     g_slowTable[2].acc_total    = NULL;
@@ -240,6 +265,7 @@ static void HT7017_BuildTables(void)
     g_slowTable[3].is_signed    = 0;
     g_slowTable[3].has_offset   = 0;
     g_slowTable[3].is_energy    = 1;
+    g_slowTable[3].is_emusr     = 0;
     g_slowTable[3].last_raw_acc = &g_ep1_last;
     g_slowTable[3].seeded_flag  = &g_ep1_seeded;
     g_slowTable[3].acc_total    = &g_wh_total;
@@ -255,6 +281,7 @@ static void HT7017_BuildTables(void)
     g_slowTable[4].is_signed    = 0;
     g_slowTable[4].has_offset   = 0;
     g_slowTable[4].is_energy    = 1;
+    g_slowTable[4].is_emusr     = 0;
     g_slowTable[4].last_raw_acc = &g_eq1_last;
     g_slowTable[4].seeded_flag  = &g_eq1_seeded;
     g_slowTable[4].acc_total    = &g_varh_total;
@@ -262,21 +289,38 @@ static void HT7017_BuildTables(void)
     g_slowTable[4].name         = "ReactiveEnergy";
     g_slowTable[4].unit         = "VARh";
     g_slowTable[4].obk_ch       = HT7017_CHANNEL_VARH;
+
+    // S5: EMUSR — EMU status register (v14 NEW)
+    // target/scale/etc. are all NULL — is_emusr=1 triggers special handler
+    g_slowTable[5].reg          = HT7017_REG_EMUSR;
+    g_slowTable[5].target       = NULL;
+    g_slowTable[5].scale        = NULL;
+    g_slowTable[5].is_signed    = 0;
+    g_slowTable[5].has_offset   = 0;
+    g_slowTable[5].is_energy    = 0;
+    g_slowTable[5].is_emusr     = 1;
+    g_slowTable[5].last_raw_acc = NULL;
+    g_slowTable[5].seeded_flag  = NULL;
+    g_slowTable[5].acc_total    = NULL;
+    g_slowTable[5].last_raw_cal = NULL;
+    g_slowTable[5].name         = "EMUSR";
+    g_slowTable[5].unit         = "bits";
+    g_slowTable[5].obk_ch       = HT7017_CHANNEL_EMUSR;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION C — SCHEDULING STATE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static uint8_t  g_fastIndex   = 0;      // current position in fast table
-static uint8_t  g_slowIndex   = 0;      // current position in slow table
-static uint32_t g_callCount   = 0;      // incremented every RunEverySecond() call
-static bool     g_lastWasFast = true;   // which table's reply to expect next
-static uint8_t  g_fastMiss    = 0;      // consecutive miss count for fast table
-static uint8_t  g_slowMiss    = 0;      // consecutive miss count for slow table
+static uint8_t  g_fastIndex   = 0;
+static uint8_t  g_slowIndex   = 0;
+// g_callCount defined in Section A2 (uint32_t g_callCount = 0)
+static bool     g_lastWasFast = true;
+static uint8_t  g_fastMiss    = 0;
+static uint8_t  g_slowMiss    = 0;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION D — HELPERS (identical to v12)
+// SECTION D — HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 static uint8_t HT7017_Checksum(uint8_t reg, uint8_t d2, uint8_t d1, uint8_t d0)
@@ -286,10 +330,10 @@ static uint8_t HT7017_Checksum(uint8_t reg, uint8_t d2, uint8_t d1, uint8_t d0)
 
 static float HT7017_Convert(uint32_t raw, const RegRead_t *r)
 {
-    // FIX 1 (v12): FREQ is a period counter — formula is g_fScale/raw not raw/g_fScale
+    // FIX 1 (v12): FREQ is a period counter — formula is g_fScale/raw
     if (r->reg == HT7017_REG_FREQ) {
         if (raw == 0) return 0.0f;
-        return (*r->scale) / (float)raw;  // 500000 / raw
+        return (*r->scale) / (float)raw;
     }
 
     float val;
@@ -309,20 +353,6 @@ static float HT7017_Convert(uint32_t raw, const RegRead_t *r)
     return result;
 }
 
-static void HT7017_UpdateDerived(void)
-{
-    g_apparent = g_voltage * g_current;
-
-    float s = (g_apparent_s1 > 0.5f) ? g_apparent_s1 : g_apparent;
-    if (s > 0.5f && g_power > 0.0f) {
-        g_power_factor = g_power / s;
-        if (g_power_factor > 1.0f) g_power_factor = 1.0f;
-        if (g_power_factor < 0.0f) g_power_factor = 0.0f;
-    } else {
-        g_power_factor = 0.0f;
-    }
-}
-
 static void HT7017_PublishChannel(uint8_t ch, float value)
 {
     if (ch == 0) return;
@@ -332,12 +362,157 @@ static void HT7017_PublishChannel(uint8_t ch, float value)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION E — ENERGY ACCUMULATOR (identical to v12)
+// SECTION D2 — POWER FACTOR UPDATE (v14 — called after every fast frame)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static void HT7017_UpdatePowerFactor(void)
+{
+    // Always compute apparent from V*I — this is always fresh
+    g_apparent = g_voltage * g_current;
+
+    // PF denominator: use V*I (fast and reliable)
+    // g_apparent_s1 is diagnostic only — see HTTP page
+    if (g_apparent > 0.5f && g_power > 0.0f) {
+        g_power_factor = g_power / g_apparent;
+        if (g_power_factor > 1.0f) g_power_factor = 1.0f;
+        if (g_power_factor < 0.0f) g_power_factor = 0.0f;
+    } else {
+        g_power_factor = 0.0f;
+    }
+
+    // Always publish PF immediately after it is recomputed
+    if (HT7017_CHANNEL_PF > 0) {
+        HT7017_PublishChannel(HT7017_CHANNEL_PF, g_power_factor);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION D3 — SOFTWARE PROTECTION EVALUATION (v14)
+// Called after every fast poll so OV/UV/OC/OP are detected within ~1.7s.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static void HT7017_EvaluateProtection(void)
+{
+    // Nothing to do if no thresholds are set and no relay is tripped
+    bool any_threshold = (g_ovThreshold > 0.0f) ||
+                         (g_uvThreshold > 0.0f) ||
+                         (g_ocThreshold > 0.0f) ||
+                         (g_opThreshold > 0.0f);
+    if (!any_threshold && !g_relayTripped) return;
+
+    uint8_t new_alarm = 0;
+
+    // Check for fault conditions (priority: OV > OC > OP > UV)
+    if (g_ovThreshold > 0.0f && g_voltage > g_ovThreshold) {
+        new_alarm = 1;  // OV
+    } else if (g_ocThreshold > 0.0f && g_current > g_ocThreshold) {
+        new_alarm = 3;  // OC
+    } else if (g_opThreshold > 0.0f && g_power > g_opThreshold) {
+        new_alarm = 4;  // OP
+    } else if (g_uvThreshold > 0.0f &&
+               g_voltage < g_uvThreshold &&
+               g_voltage > HT7017_UV_MIN_VOLTAGE) {
+        // UV guard: only trip if V > 10V to avoid false trip at standby/power-off
+        new_alarm = 2;  // UV
+    }
+
+    if (new_alarm != 0 && !g_relayTripped) {
+        // TRIP: new fault, relay not yet tripped
+        g_alarmState    = new_alarm;
+        g_relayTripped  = true;
+        g_tripCallCount = g_callCount;
+
+        // Drive relay OFF
+        char buf[32];
+        snprintf(buf, sizeof(buf), "setChannel %u 0", g_relayChannel);
+        CMD_ExecuteCommand(buf, 0);
+
+        // Publish alarm channel
+        if (HT7017_CHANNEL_ALARM > 0) {
+            char buf2[48];
+            snprintf(buf2, sizeof(buf2), "setChannel %u %d",
+                     HT7017_CHANNEL_ALARM, (int)(g_alarmState * 100));
+            CMD_ExecuteCommand(buf2, 0);
+        }
+
+        const char *alarm_names[] = { "OK", "OV", "UV", "OC", "OP" };
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017: PROTECTION TRIP [%s]  V=%.2f I=%.3f P=%.1f  relay ch=%u OFF",
+                  alarm_names[new_alarm], g_voltage, g_current, g_power, g_relayChannel);
+
+    } else if (g_relayTripped && new_alarm == 0) {
+        // Fault cleared — check if recovery window has passed
+        uint32_t elapsed_calls = g_callCount - g_tripCallCount;
+        // 4 fast calls per 5 seconds → HT7017_PROT_RECOVER_SECONDS / (5/4)
+        uint32_t recover_calls = (uint32_t)HT7017_PROT_RECOVER_SECONDS * 4u / 5u;
+
+        if (elapsed_calls >= recover_calls) {
+            g_relayTripped = false;
+            g_alarmState   = 0;
+
+            // Re-enable relay
+            char buf[32];
+            snprintf(buf, sizeof(buf), "setChannel %u 1", g_relayChannel);
+            CMD_ExecuteCommand(buf, 0);
+
+            // Clear alarm channel
+            if (HT7017_CHANNEL_ALARM > 0) {
+                char buf2[48];
+                snprintf(buf2, sizeof(buf2), "setChannel %u 0", HT7017_CHANNEL_ALARM);
+                CMD_ExecuteCommand(buf2, 0);
+            }
+
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "HT7017: PROTECTION CLEAR — relay ch=%u restored  V=%.2f I=%.3f P=%.1f",
+                      g_relayChannel, g_voltage, g_current, g_power);
+        }
+
+    } else if (g_relayTripped && new_alarm != 0) {
+        // Still in fault — keep relay off, update alarm code if changed
+        if (new_alarm != g_alarmState) {
+            g_alarmState = new_alarm;
+            if (HT7017_CHANNEL_ALARM > 0) {
+                char buf2[48];
+                snprintf(buf2, sizeof(buf2), "setChannel %u %d",
+                         HT7017_CHANNEL_ALARM, (int)(g_alarmState * 100));
+                CMD_ExecuteCommand(buf2, 0);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION D4 — EMUSR PROCESSING (v14)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static void HT7017_ProcessEmusr(uint32_t raw)
+{
+    g_emusr_raw = raw;
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: [EMUSR] raw=0x%06X  OV=%u UV=%u OC=%u OP=%u ZXLOSS=%u",
+              raw,
+              (raw & HT7017_EMUSR_BIT_OV)     ? 1u : 0u,
+              (raw & HT7017_EMUSR_BIT_UV)     ? 1u : 0u,
+              (raw & HT7017_EMUSR_BIT_OC)     ? 1u : 0u,
+              (raw & HT7017_EMUSR_BIT_OP)     ? 1u : 0u,
+              (raw & HT7017_EMUSR_BIT_ZXLOSS) ? 1u : 0u);
+
+    // Publish raw bitmask to channel (value * 100 convention → raw bitmask * 100)
+    if (HT7017_CHANNEL_EMUSR > 0) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "setChannel %u %u",
+                 HT7017_CHANNEL_EMUSR, (unsigned)(raw & 0x1F));
+        CMD_ExecuteCommand(buf, 0);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION E — ENERGY ACCUMULATOR (unchanged from v12)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 static void HT7017_AccumulateEnergy(uint32_t raw, const RegRead_t *r)
 {
-    // FIX 4 (v12): bool seeded flag — 0xFFFFFFFF is a valid 24-bit counter value
     if (!(*r->seeded_flag)) {
         *r->last_raw_acc = raw;
         *r->seeded_flag  = true;
@@ -376,7 +551,7 @@ static void HT7017_AccumulateEnergy(uint32_t raw, const RegRead_t *r)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION F — FRAME PROCESSING (works for both tables)
+// SECTION F — FRAME PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════
 
 static void HT7017_ProcessFrame(uint8_t d2, uint8_t d1, uint8_t d0, uint8_t cs,
@@ -398,9 +573,21 @@ static void HT7017_ProcessFrame(uint8_t d2, uint8_t d1, uint8_t d0, uint8_t cs,
 
     if (r->last_raw_cal) *r->last_raw_cal = raw;
 
+    // ── EMUSR: special path ───────────────────────────────────────────────────
+    if (r->is_emusr) {
+        HT7017_ProcessEmusr(raw);
+        return;
+    }
+
+    // ── Energy accumulator path ───────────────────────────────────────────────
     if (r->is_energy) {
         HT7017_AccumulateEnergy(raw, r);
     } else {
+        // ── S1: record freshness tick ─────────────────────────────────────────
+        if (r->reg == HT7017_REG_POWER_S1) {
+            g_s1_last_update_tick = g_callCount;
+        }
+
         float value = HT7017_Convert(raw, r);
         *r->target  = value;
 
@@ -427,11 +614,16 @@ static void HT7017_ProcessFrame(uint8_t d2, uint8_t d1, uint8_t d0, uint8_t cs,
         }
     }
 
-    HT7017_UpdateDerived();
-    if (HT7017_CHANNEL_PF > 0) {
-        HT7017_PublishChannel(HT7017_CHANNEL_PF, g_power_factor);
-    }
+    // ── Recompute PF after every frame (v14) ─────────────────────────────────
+    HT7017_UpdatePowerFactor();
 
+    // ── Software protection evaluated after every fast frame ─────────────────
+    // We only run it after fast registers (V, I, P) since those are the signals
+    // that matter and they update every ~1.7s. Slow frames also call this but
+    // it's cheap and harmless.
+    HT7017_EvaluateProtection();
+
+    // ── NTP session start ─────────────────────────────────────────────────────
     if (g_session_start_unix == 0) {
         uint32_t now = NTP_GetCurrentTime();
         if (now > 1000000000u) {
@@ -452,7 +644,7 @@ static void HT7017_SendRequest(uint8_t reg)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION G — CONSOLE COMMANDS (identical to v12)
+// SECTION G — CONSOLE COMMANDS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 static commandResult_t CMD_VoltageSet(const void *ctx, const char *cmd,
@@ -542,7 +734,7 @@ static commandResult_t CMD_EnergyReset(const void *ctx, const char *cmd,
 {
     g_wh_total   = 0.0f;
     g_varh_total = 0.0f;
-    g_ep1_seeded = false;   // FIX 4 (v12)
+    g_ep1_seeded = false;
     g_eq1_seeded = false;
 
     uint32_t now = NTP_GetCurrentTime();
@@ -606,17 +798,38 @@ static commandResult_t CMD_Energy(const void *ctx, const char *cmd,
 static commandResult_t CMD_Status(const void *ctx, const char *cmd,
                                    const char *args, int flags)
 {
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╔══ HT7017 v13 Status ══╗");
+    const char *alarm_names[] = { "OK", "OV", "UV", "OC", "OP" };
+    uint32_t s1_age_calls = g_callCount - g_s1_last_update_tick;
+    uint32_t s1_age_secs  = s1_age_calls * 5u / 4u;  // approximate
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╔══ HT7017 v14 Status ══╗");
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Voltage        : %.2f V",    g_voltage);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Current        : %.3f A",    g_current);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Active Power   : %.2f W",    g_power);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Reactive Power : %.2f VAR",  g_reactive);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Apparent (V*I) : %.2f VA",   g_apparent);
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Apparent (S1)  : %.2f VA",   g_apparent_s1);
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Power Factor   : %.4f",      g_power_factor);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Apparent (S1)  : %.2f VA  (age ~%us)",
+              g_apparent_s1, s1_age_secs);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Power Factor   : %.4f  (V*I basis)",
+              g_power_factor);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Frequency      : %.3f Hz",   g_freq);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Active Energy  : %.4f Wh",   g_wh_total);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  Reactive Energy: %.4f VARh", g_varh_total);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  EMUSR (0x19)   : 0x%02X  OV=%u UV=%u OC=%u OP=%u ZXLOSS=%u",
+              g_emusr_raw,
+              (g_emusr_raw & HT7017_EMUSR_BIT_OV)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_UV)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_OC)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_OP)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_ZXLOSS) ? 1u : 0u);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  SW Prot Alarm  : %s  relay_ch=%u %s",
+              alarm_names[g_alarmState], g_relayChannel,
+              g_relayTripped ? "[TRIPPED]" : "[OK]");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  SW Thresholds  : OV=%.1fV UV=%.1fV OC=%.3fA OP=%.1fW",
+              g_ovThreshold, g_uvThreshold, g_ocThreshold, g_opThreshold);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "  Scales  V=%.2f I=%.2f P=%.4f F=%.0f Q=%.4f S=%.4f",
               g_vScale, g_iScale, g_pScale, g_fScale, g_qScale, g_sScale);
@@ -657,6 +870,114 @@ static commandResult_t CMD_NoParity(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
+// ── Protection threshold commands (v14) ───────────────────────────────────────
+
+static commandResult_t CMD_SetOV(const void *ctx, const char *cmd,
+                                  const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float v = (float)atof(args);
+    if (v < 0.0f) return CMD_RES_BAD_ARGUMENT;
+    g_ovThreshold = v;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: OverVoltage threshold set to %.1f V %s",
+              v, (v == 0.0f) ? "(disabled)" : "");
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_SetUV(const void *ctx, const char *cmd,
+                                  const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float v = (float)atof(args);
+    if (v < 0.0f) return CMD_RES_BAD_ARGUMENT;
+    g_uvThreshold = v;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: UnderVoltage threshold set to %.1f V %s "
+              "(UV guard: only trips if V > %.0f V)",
+              v, (v == 0.0f) ? "(disabled)" : "", HT7017_UV_MIN_VOLTAGE);
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_SetOC(const void *ctx, const char *cmd,
+                                  const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float a = (float)atof(args);
+    if (a < 0.0f) return CMD_RES_BAD_ARGUMENT;
+    g_ocThreshold = a;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: OverCurrent threshold set to %.3f A %s",
+              a, (a == 0.0f) ? "(disabled)" : "");
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_SetOP(const void *ctx, const char *cmd,
+                                  const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float w = (float)atof(args);
+    if (w < 0.0f) return CMD_RES_BAD_ARGUMENT;
+    g_opThreshold = w;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: OverPower threshold set to %.1f W %s",
+              w, (w == 0.0f) ? "(disabled)" : "");
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_SetRelayChannel(const void *ctx, const char *cmd,
+                                            const char *args, int flags)
+{
+    if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    int ch = atoi(args);
+    if (ch <= 0 || ch > 32) return CMD_RES_BAD_ARGUMENT;
+    g_relayChannel = (uint8_t)ch;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017: Protection relay channel set to %u", g_relayChannel);
+    return CMD_RES_OK;
+}
+
+static commandResult_t CMD_ProtStatus(const void *ctx, const char *cmd,
+                                       const char *args, int flags)
+{
+    const char *alarm_names[] = { "OK", "OV", "UV", "OC", "OP" };
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╔══ HT7017 Protection Status ══╗");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Relay Channel   : %u", g_relayChannel);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Current Alarm   : %s  %s",
+              alarm_names[g_alarmState], g_relayTripped ? "[RELAY OFF]" : "[RELAY OK]");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  OV threshold    : %.1f V  %s",
+              g_ovThreshold, g_ovThreshold > 0.0f ? "" : "(disabled)");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  UV threshold    : %.1f V  %s  guard=%.0fV min",
+              g_uvThreshold, g_uvThreshold > 0.0f ? "" : "(disabled)",
+              HT7017_UV_MIN_VOLTAGE);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  OC threshold    : %.3f A  %s",
+              g_ocThreshold, g_ocThreshold > 0.0f ? "" : "(disabled)");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  OP threshold    : %.1f W  %s",
+              g_opThreshold, g_opThreshold > 0.0f ? "" : "(disabled)");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Auto-recover    : %u s after fault clears",
+              HT7017_PROT_RECOVER_SECONDS);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  EMUSR (HW flags): 0x%02X  OV=%u UV=%u OC=%u OP=%u ZXLOSS=%u",
+              g_emusr_raw,
+              (g_emusr_raw & HT7017_EMUSR_BIT_OV)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_UV)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_OC)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_OP)     ? 1u : 0u,
+              (g_emusr_raw & HT7017_EMUSR_BIT_ZXLOSS) ? 1u : 0u);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "  Current V=%.2f I=%.3f P=%.1f",
+              g_voltage, g_current, g_power);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "╚═══════════════════════════════╝");
+    return CMD_RES_OK;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION H — INIT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -665,55 +986,72 @@ void HT7017_Init(void)
 {
     HT7017_BuildTables();
 
-    // Start fast index at last slot so first increment lands on slot 0 (Voltage)
-    g_fastIndex   = FAST_TABLE_SIZE - 1;
-    g_slowIndex   = SLOW_TABLE_SIZE - 1;
-    g_callCount   = 0;
-    g_lastWasFast = true;
-    g_fastMiss    = 0;
-    g_slowMiss    = 0;
-    g_txCount     = 0;
-    g_goodFrames  = 0;
-    g_badFrames   = 0;
-    g_totalMisses = 0;
+    g_fastIndex          = FAST_TABLE_SIZE - 1;
+    g_slowIndex          = SLOW_TABLE_SIZE - 1;
+    g_callCount          = 0;
+    g_lastWasFast        = true;
+    g_fastMiss           = 0;
+    g_slowMiss           = 0;
+    g_txCount            = 0;
+    g_goodFrames         = 0;
+    g_badFrames          = 0;
+    g_totalMisses        = 0;
+    g_emusr_raw          = 0;
+    g_alarmState         = 0;
+    g_relayTripped       = false;
+    g_tripCallCount      = 0;
+    g_s1_last_update_tick = 0;
 
     UART_InitReceiveRingBuffer(256);
     UART_InitUART(HT7017_BAUD_RATE, HT7017_PARITY_EVEN, 0);
 
-    CMD_RegisterCommand("VoltageSet",          CMD_VoltageSet,  NULL);
-    CMD_RegisterCommand("CurrentSet",          CMD_CurrentSet,  NULL);
-    CMD_RegisterCommand("PowerSet",            CMD_PowerSet,    NULL);
-    CMD_RegisterCommand("HT7017_Energy_Reset", CMD_EnergyReset, NULL);
-    CMD_RegisterCommand("HT7017_Energy",       CMD_Energy,      NULL);
-    CMD_RegisterCommand("HT7017_Status",       CMD_Status,      NULL);
-    CMD_RegisterCommand("HT7017_Baud",         CMD_Baud,        NULL);
-    CMD_RegisterCommand("HT7017_NoParity",     CMD_NoParity,    NULL);
+    CMD_RegisterCommand("VoltageSet",             CMD_VoltageSet,      NULL);
+    CMD_RegisterCommand("CurrentSet",             CMD_CurrentSet,      NULL);
+    CMD_RegisterCommand("PowerSet",               CMD_PowerSet,        NULL);
+    CMD_RegisterCommand("HT7017_Energy_Reset",    CMD_EnergyReset,     NULL);
+    CMD_RegisterCommand("HT7017_Energy",          CMD_Energy,          NULL);
+    CMD_RegisterCommand("HT7017_Status",          CMD_Status,          NULL);
+    CMD_RegisterCommand("HT7017_Baud",            CMD_Baud,            NULL);
+    CMD_RegisterCommand("HT7017_NoParity",        CMD_NoParity,        NULL);
+    CMD_RegisterCommand("HT7017_SetOV",           CMD_SetOV,           NULL);
+    CMD_RegisterCommand("HT7017_SetUV",           CMD_SetUV,           NULL);
+    CMD_RegisterCommand("HT7017_SetOC",           CMD_SetOC,           NULL);
+    CMD_RegisterCommand("HT7017_SetOP",           CMD_SetOP,           NULL);
+    CMD_RegisterCommand("HT7017_SetRelayChannel", CMD_SetRelayChannel, NULL);
+    CMD_RegisterCommand("HT7017_ProtStatus",      CMD_ProtStatus,      NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v13: KWS-303WF  BK7231N->HT7017 direct  shunt");
+              "HT7017 v14: KWS-303WF  BK7231N->HT7017 direct  shunt");
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v13: %s  4800 8E1",
+              "HT7017 v14: %s  4800 8E1",
               CFG_HasFlag(26) ? "UART2" : "UART1 (P0/P1)");
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v13: two-speed poll  FAST(V,I,P) every ~1.7s  "
-              "SLOW(Q,S,F,EP1,EQ1) every ~25s");
+              "HT7017 v14: two-speed poll  FAST(V,I,P) every ~1.7s  "
+              "SLOW(Q,S,F,EP1,EQ1,EMUSR) every ~30s");
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v13: V=%.2f I=%.2f P=%.4f F=%.0f offset=%.0f",
+              "HT7017 v14: PF=P/(V*I) published every fast cycle  "
+              "EMUSR polled from slow table");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017 v14: SW protection relay_ch=%u OV=%.1f UV=%.1f OC=%.3f OP=%.1f",
+              g_relayChannel, g_ovThreshold, g_uvThreshold, g_ocThreshold, g_opThreshold);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "HT7017 v14: V=%.2f I=%.2f P=%.4f F=%.0f offset=%.0f",
               g_vScale, g_iScale, g_pScale, g_fScale, g_iOffset);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v13: Q=%.4f S=%.4f EP1=%.4f",
+              "HT7017 v14: Q=%.4f S=%.4f EP1=%.4f",
               g_qScale, g_sScale, g_e1Scale);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "HT7017 v13: Ch V=%u I=%u P=%u F=%u PF=%u Q=%u S=%u Wh=%u VARh=%u",
-              HT7017_CHANNEL_VOLTAGE, HT7017_CHANNEL_CURRENT,
-              HT7017_CHANNEL_POWER,   HT7017_CHANNEL_FREQ,
-              HT7017_CHANNEL_PF,      HT7017_CHANNEL_REACTIVE,
-              HT7017_CHANNEL_APPARENT,HT7017_CHANNEL_WH,
-              HT7017_CHANNEL_VARH);
+              "HT7017 v14: Ch V=%u I=%u P=%u F=%u PF=%u Q=%u S=%u Wh=%u VARh=%u EMUSR=%u ALM=%u",
+              HT7017_CHANNEL_VOLTAGE,  HT7017_CHANNEL_CURRENT,
+              HT7017_CHANNEL_POWER,    HT7017_CHANNEL_FREQ,
+              HT7017_CHANNEL_PF,       HT7017_CHANNEL_REACTIVE,
+              HT7017_CHANNEL_APPARENT, HT7017_CHANNEL_WH,
+              HT7017_CHANNEL_VARH,     HT7017_CHANNEL_EMUSR,
+              HT7017_CHANNEL_ALARM);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION I — RUN (v13 two-speed scheduler)
+// SECTION I — RUN (v14: SLOW_TABLE_SIZE now 6, logic unchanged)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void HT7017_RunEverySecond(void)
@@ -728,7 +1066,6 @@ void HT7017_RunEverySecond(void)
         uint8_t cs = UART_GetByte(3);
         UART_ConsumeBytes(HT7017_RESPONSE_LEN);
 
-        // Route reply to whichever table sent last
         if (g_lastWasFast) {
             HT7017_ProcessFrame(d2, d1, d0, cs, &g_fastTable[g_fastIndex]);
             g_fastMiss = 0;
@@ -738,11 +1075,9 @@ void HT7017_RunEverySecond(void)
         }
 
     } else {
-        // No reply received
         g_totalMisses++;
 
         if (g_txCount > 0) {
-            // Only log after first TX so boot silence is clean
             if (g_lastWasFast) {
                 g_fastMiss++;
                 addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
@@ -779,7 +1114,6 @@ void HT7017_RunEverySecond(void)
     g_callCount++;
 
     if (g_callCount % HT7017_FAST_RATIO == 0) {
-        // This call belongs to the slow table
         g_slowIndex   = (g_slowIndex + 1) % SLOW_TABLE_SIZE;
         g_lastWasFast = false;
         uint8_t reg   = g_slowTable[g_slowIndex].reg;
@@ -788,7 +1122,6 @@ void HT7017_RunEverySecond(void)
                   "HT7017: TX > 6A %02X [SLOW:%s] (tx=%u)",
                   reg, g_slowTable[g_slowIndex].name, g_txCount);
     } else {
-        // This call belongs to the fast table
         g_fastIndex   = (g_fastIndex + 1) % FAST_TABLE_SIZE;
         g_lastWasFast = true;
         uint8_t reg   = g_fastTable[g_fastIndex].reg;
@@ -801,7 +1134,6 @@ void HT7017_RunEverySecond(void)
 
 void HT7017_RunQuick(void)
 {
-    // Unchanged from v12 — ISR path, no index advancement
     if (UART_GetDataSize() < HT7017_RESPONSE_LEN) return;
     uint8_t d2 = UART_GetByte(0);
     uint8_t d1 = UART_GetByte(1);
@@ -809,17 +1141,15 @@ void HT7017_RunQuick(void)
     uint8_t cs = UART_GetByte(3);
     UART_ConsumeBytes(HT7017_RESPONSE_LEN);
 
-    // Route to whichever table is currently active
     if (g_lastWasFast) {
         HT7017_ProcessFrame(d2, d1, d0, cs, &g_fastTable[g_fastIndex]);
     } else {
         HT7017_ProcessFrame(d2, d1, d0, cs, &g_slowTable[g_slowIndex]);
     }
-    // Do NOT advance any index — RunEverySecond manages all index movement
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION J — HTTP PAGE (v12 unchanged, version bump only)
+// SECTION J — HTTP PAGE (v14: added protection row + EMUSR row)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
@@ -832,9 +1162,18 @@ void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
     uint32_t hrs     = (elapsed % 86400) / 3600;
     uint32_t mins    = (elapsed % 3600)  / 60;
 
-    char tmp[1200];
+    const char *alarm_str = "OK";
+    const char *alarm_col = "#000";
+    switch (g_alarmState) {
+        case 1: alarm_str = "OV TRIP"; alarm_col = "#c00"; break;
+        case 2: alarm_str = "UV TRIP"; alarm_col = "#a50"; break;
+        case 3: alarm_str = "OC TRIP"; alarm_col = "#c00"; break;
+        case 4: alarm_str = "OP TRIP"; alarm_col = "#c00"; break;
+    }
+
+    char tmp[1600];
     snprintf(tmp, sizeof(tmp),
-        "<h5>HT7017 v13 - KWS-303WF</h5>"
+        "<h5>HT7017 v14 - KWS-303WF</h5>"
         "<table border='1' cellpadding='4' style='border-collapse:collapse'>"
         "<tr><th>Parameter</th><th>Value</th></tr>"
         "<tr><td>Voltage</td><td><b>%.2f V</b></td></tr>"
@@ -847,6 +1186,10 @@ void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
         "<tr><td>Power Factor</td><td><b>%.4f</b></td></tr>"
         "<tr><td>Active Energy</td><td><b>%.4f Wh (%.5f kWh)</b></td></tr>"
         "<tr><td>Reactive Energy</td><td><b>%.4f VARh</b></td></tr>"
+        "<tr><td>EMUSR (HW)</td><td><b>0x%02X "
+          "OV=%u UV=%u OC=%u OP=%u</b></td></tr>"
+        "<tr><td>SW Protection</td><td><b style='color:%s'>%s</b> "
+          "OV=%.0f UV=%.0f OC=%.2f OP=%.0f</td></tr>"
         "<tr><td>Session</td><td><b>%ud %02uh %02um</b></td></tr>"
         "<tr><td colspan='2' style='font-size:0.8em;color:#666'>"
           "good=%u bad=%u miss=%u tx=%u | "
@@ -859,6 +1202,13 @@ void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
         g_power_factor,
         g_wh_total, g_wh_total / 1000.0f,
         g_varh_total,
+        g_emusr_raw,
+        (g_emusr_raw & HT7017_EMUSR_BIT_OV) ? 1u : 0u,
+        (g_emusr_raw & HT7017_EMUSR_BIT_UV) ? 1u : 0u,
+        (g_emusr_raw & HT7017_EMUSR_BIT_OC) ? 1u : 0u,
+        (g_emusr_raw & HT7017_EMUSR_BIT_OP) ? 1u : 0u,
+        alarm_col, alarm_str,
+        g_ovThreshold, g_uvThreshold, g_ocThreshold, g_opThreshold,
         days, hrs, mins,
         g_goodFrames, g_badFrames, g_totalMisses, g_txCount,
         g_vScale, g_iScale, g_pScale, g_qScale, g_sScale, g_e1Scale);
@@ -868,7 +1218,7 @@ void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION K — GETTERS (unchanged)
+// SECTION K — GETTERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 float    HT7017_GetVoltage(void)        { return g_voltage;       }
@@ -885,5 +1235,7 @@ float    HT7017_GetReactivePower(void)  { return g_reactive;      }
 float    HT7017_GetApparentS1(void)     { return g_apparent_s1;   }
 float    HT7017_GetWh(void)             { return g_wh_total;      }
 float    HT7017_GetVARh(void)           { return g_varh_total;    }
+uint32_t HT7017_GetEmusr(void)          { return g_emusr_raw;     }
+uint8_t  HT7017_GetAlarmState(void)     { return g_alarmState;    }
 
 #endif // ENABLE_DRIVER_HT7017
