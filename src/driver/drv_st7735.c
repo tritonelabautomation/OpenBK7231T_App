@@ -442,19 +442,19 @@ static void btn_tick(void)
 #define ROW_STATUS_Y    0
 #define ROW_STATUS_H   10
 #define ROW_V_Y        11      /* 1px natural black gap at Y=10 */
-#define ROW_V_H        29
-#define ROW_A_Y        40      /* 11+29 */
-#define ROW_A_H        29
-#define ROW_W_Y        69      /* 40+29 */
-#define ROW_W_H        29
-#define ROW_KWH_Y      98      /* 69+29 */
-#define ROW_KWH_H      15
-#define ROW_COST_Y    113      /* 98+15 */
-#define ROW_COST_H     15
-#define ROW_PFHZ_Y    128      /* 113+15 */
-#define ROW_PFHZ_H     15
-#define ROW_TEMPTMR_Y 143      /* 128+15 */
-#define ROW_TEMPTMR_H  17      /* 143+17=160 ✓ */
+#define ROW_V_H        24
+#define ROW_A_Y        35      /* 11+29 */
+#define ROW_A_H        24
+#define ROW_W_Y        59      /* 40+29 */
+#define ROW_W_H        24
+#define ROW_KWH_Y      83      /* 69+29 */
+#define ROW_KWH_H      18
+#define ROW_COST_Y    101      /* 98+15 */
+#define ROW_COST_H     22
+#define ROW_PFHZ_Y    123      /* 113+15 */
+#define ROW_PFHZ_H     18
+#define ROW_TEMPTMR_Y 141      /* 128+15 */
+#define ROW_TEMPTMR_H  18      /* 143+17=160 ✓ */
 
 #define VAL_S   2    /* large scale: 12px/ch wide, 14px tall */
 #define SML_S   1    /* small scale:  6px/ch wide,  7px tall */
