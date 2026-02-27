@@ -55,6 +55,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "../httpserver/new_http.h"
+
 
 /* ── Calibration defaults (override via compiler -D flags) ────────────── */
 #ifndef HT7017_DEFAULT_VOLTAGE_SCALE
