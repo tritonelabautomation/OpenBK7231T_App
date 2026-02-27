@@ -418,24 +418,6 @@ static void btn_tick(void)
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * SECTION H — ENERGY SCREEN LAYOUT + EV SESSION
- *
- * Responsibility: draw all 8 screen rows, manage EV session state.
- * Calls adc_read_temp() (Section F) for temperature.
- * Calls ST7735_FillRect / ST7735_DrawString / ST7735_DrawChar (Section E).
- * No SPI bit-bang detail here — only high-level drawing calls.
- *
- * Layout (no dividers — matches attached working code exactly):
- *   Y=  0 H=10  STATUS: "OFF    NoWF"
- *   Y= 11 H=29  VOLTAGE: "221.5 V"      RED   scale2
- *   Y= 40 H=29  CURRENT: "0.55  A"      CYAN  scale2
- *   Y= 69 H=29  POWER:   "121.7 W"      YELLOW scale2
- *   Y= 98 H=15  kWh:     "000.47kWh"    CYAN  scale1
- *   Y=113 H=15  COST:    "Rs   3.76"    GREEN scale1
- *   Y=128 H=15  PF+Hz:   "0.20PF 49.9Hz" RED|BLUE scale1
- *   Y=143 H=17  TEMP+TMR:"27.16C  01:23" ORANGE|WHITE scale1
- *
- * TGSPDCL CAT-2B tariff defaults:
- *   Rs 3.75/unit (slab 201-300). Override via console: ev_rate <value>
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 /* ── Layout constants (pixel-verified, no dividers) ──────────────────────── */
@@ -443,57 +425,64 @@ static void btn_tick(void)
 #define ROW_STATUS_H   10
 #define ROW_V_Y        11      /* 1px natural black gap at Y=10 */
 #define ROW_V_H        24
-#define ROW_A_Y        35     
+#define ROW_A_Y        35
 #define ROW_A_H        24
-#define ROW_W_Y        59      
+#define ROW_W_Y        59
 #define ROW_W_H        24
-#define ROW_COST_Y     83      
+#define ROW_COST_Y     83
 #define ROW_COST_H     23
-#define ROW_KWH_Y     106      
+#define ROW_KWH_Y     106
 #define ROW_KWH_H      18
-#define ROW_PFHZ_Y    124      
+#define ROW_PFHZ_Y    124
 #define ROW_PFHZ_H     18
-#define ROW_TEMPTMR_Y 142      
-#define ROW_TEMPTMR_H  18      
+#define ROW_TEMPTMR_Y 142
+#define ROW_TEMPTMR_H  18
 
 #define VAL_S   2    /* large scale: 12px/ch wide, 14px tall */
 #define SML_S   1    /* small scale:  6px/ch wide,  7px tall */
 
-/* Large rows: right 10px = unit label drawn once at init; left 70px = value */
-#define LBL_W       (FONT_W * VAL_S)          /* 10 */
-#define LBL_X       (ST7735_WIDTH - LBL_W)    /* 70 */
-#define VAL_ZONE_W   LBL_X                    /* 70 */
+#define LBL_W       (FONT_W * VAL_S)
+#define LBL_X       (ST7735_WIDTH - LBL_W)
+#define VAL_ZONE_W   LBL_X
+#define SML_FULL_W   ST7735_WIDTH
 
-/* Small full-row */
-#define SML_FULL_W   ST7735_WIDTH             /* 80 */
-
-/* PF+Hz split: PF x=0 w=38 | Hz x=38 w=42 */
 #define PFHZ_PF_X    0
 #define PFHZ_PF_W   38
 #define PFHZ_HZ_X   38
 #define PFHZ_HZ_W   42
 
-/* Status row: relay left | WiFi right */
 #define STA_RELAY_X   0
-#define STA_RELAY_W  22    /* "ON "/"OFF" = 3ch×6=18px, clear 22px */
-#define STA_WIFI_X   56    /* 80-24=56 */
-#define STA_WIFI_W   24    /* "WiFi"/"NoWF" = 4ch×6=24px */
+#define STA_RELAY_W  22
+#define STA_WIFI_X   56
+#define STA_WIFI_W   24
 
-/* Temp+Timer split: temp left | timer right */
 #define TEMPTMR_TC_X   0
-#define TEMPTMR_TC_W  40   /* "27.16C" = 6ch×6=36px, 4px spare */
+#define TEMPTMR_TC_W  40
 #define TEMPTMR_TM_X  40
-#define TEMPTMR_TM_W  40   /* "01:23"  = 5ch×6=30px, 10px spare */
+#define TEMPTMR_TM_W  40
 
-/* ── EV session state ─────────────────────────────────────────────────────── */
-/* TGSPDCL CAT-2B: Rs 3.75/unit is the 201-300 slab marginal rate (2024-25). */
-#define EV_DEFAULT_RATE_RS  7.7f    /* Rs per kWh — TGSPDCL CAT-2B 201-300 slab */
+/* ── RELAY: direct GPIO — FIX for non-working relay ─────────────────────────
+ * PROBLEM in original code: CHANNEL_Set(8/7, ...) goes through OpenBK's
+ * channel abstraction layer. If Ch8/Ch7 are not configured as GPIO outputs
+ * in the device config, CHANNEL_Set() only updates an internal variable —
+ * no GPIO pin is ever toggled. The relay coil never fires.
+ *
+ * FIX: Use HAL_PIN_SetOutputValue() directly on P7 (ON coil) and P8 (OFF coil).
+ * This bypasses the channel system entirely and always works.
+ *
+ * KWS-303WF schematic: Ch8→P7 = ON coil,  Ch7→P8 = OFF coil.
+ * Note: channel numbers and pin numbers are DIFFERENT (Ch8=P7, Ch7=P8).
+ */
+#define RELAY_PIN_ON   7    /* P7 = ON  coil: HIGH pulse latches relay CLOSED */
+#define RELAY_PIN_OFF  8    /* P8 = OFF coil: HIGH pulse latches relay OPEN   */
+#define RELAY_PULSE_MS 200  /* ms to hold coil energised                      */
+
+#define EV_DEFAULT_RATE_RS  7.7f
 
 static float    g_ev_rate_rs     = EV_DEFAULT_RATE_RS;
-static float    g_ev_kwh_offset  = 0.0f;   /* meter reading at session start */
-static uint32_t g_uptime_seconds = 0;       /* session timer — seconds */
+static float    g_ev_kwh_offset  = 0.0f;
+static uint32_t g_uptime_seconds = 0;
 
-/* ── Per-field string cache (SPI write skipped when value unchanged) ─────── */
 static char g_prev_v[10]    = "";
 static char g_prev_a[10]    = "";
 static char g_prev_w[10]    = "";
@@ -506,11 +495,9 @@ static char g_prev_tc[10]   = "";
 static char g_prev_on[4]    = "";
 static char g_prev_wifi[6]  = "";
 
-/* ── Display state shared with relay/wifi helpers ─────────────────────────── */
 static uint8_t g_relay_state = 0;
 static uint8_t g_wifi_ok     = 0;
 
-/* ── Helper: clear zone + draw text vertically centred ─────────────────────── */
 static void energy_update_zone(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
                                 const char *str, uint16_t fg, uint8_t scale)
 {
@@ -519,7 +506,6 @@ static void energy_update_zone(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
     ST7735_DrawString(x, ty, str, fg, ST7735_BLACK, scale);
 }
 
-/* ── Static frame: V/A/W unit labels drawn once at init ─────────────────── */
 static void energy_draw_static_frame(void)
 {
     uint8_t vy = ROW_V_Y + (ROW_V_H - FONT_H * VAL_S) / 2;
@@ -530,13 +516,12 @@ static void energy_draw_static_frame(void)
     ST7735_DrawChar(LBL_X, wy, 'W', ST7735_YELLOW, ST7735_BLACK, VAL_S);
 }
 
-/* ── Main screen draw — called every second from energy_tick() ─────────── */
 static void energy_draw_screen(float v, float a, float w,
                                 float kwh_meter, float pf, float hz)
 {
     char buf[16];
 
-    /* ── STATUS ROW ─────────────────────────────────────────────────────── */
+    /* STATUS ROW */
     const char *on_str = g_relay_state ? "ON " : "OFF";
     if (strcmp(on_str, g_prev_on) != 0) {
         strncpy(g_prev_on, on_str, sizeof(g_prev_on) - 1);
@@ -556,52 +541,47 @@ static void energy_draw_screen(float v, float a, float w,
                           ST7735_BLACK, SML_S);
     }
 
-    /* ── VOLTAGE  (RED, scale2) ─────────────────────────────────────────── */
+    /* VOLTAGE (RED, scale2) */
     snprintf(buf, sizeof(buf), "%5.1f", v);
     if (strcmp(buf, g_prev_v) != 0) {
         strncpy(g_prev_v, buf, sizeof(g_prev_v) - 1);
         energy_update_zone(0, ROW_V_Y, VAL_ZONE_W, ROW_V_H, buf, ST7735_RED, VAL_S);
     }
 
-    /* ── CURRENT  (CYAN, scale2) ────────────────────────────────────────── */
+    /* CURRENT (CYAN, scale2) */
     snprintf(buf, sizeof(buf), "%5.2f", a);
     if (strcmp(buf, g_prev_a) != 0) {
         strncpy(g_prev_a, buf, sizeof(g_prev_a) - 1);
         energy_update_zone(0, ROW_A_Y, VAL_ZONE_W, ROW_A_H, buf, ST7735_CYAN, VAL_S);
     }
 
-    /* ── POWER  (YELLOW, scale2) ─────────────────────────────────────────── */
+    /* POWER (YELLOW, scale2) */
     snprintf(buf, sizeof(buf), "%5.1f", w);
     if (strcmp(buf, g_prev_w) != 0) {
         strncpy(g_prev_w, buf, sizeof(g_prev_w) - 1);
         energy_update_zone(0, ROW_W_Y, VAL_ZONE_W, ROW_W_H, buf, ST7735_YELLOW, VAL_S);
     }
 
-    /* ── kWh  (CYAN, scale1) — session kWh = meter − offset ─────────────── */
+    /* COST (GREEN, scale1) */
     float session_kwh = kwh_meter - g_ev_kwh_offset;
     if (session_kwh < 0.0f) session_kwh = 0.0f;
+    float cost = session_kwh * g_ev_rate_rs;
+    snprintf(buf, sizeof(buf), "Rs%7.2f", cost);
+    if (strcmp(buf, g_prev_cost) != 0) {
+        strncpy(g_prev_cost, buf, sizeof(g_prev_cost) - 1);
+        energy_update_zone(0, ROW_COST_Y, SML_FULL_W, ROW_COST_H, buf, ST7735_GREEN, SML_S);
+    }
+
+    /* kWh (CYAN, scale1) */
     snprintf(buf, sizeof(buf), "%06.2fkWh", session_kwh);
     if (strcmp(buf, g_prev_kwh) != 0) {
         strncpy(g_prev_kwh, buf, sizeof(g_prev_kwh) - 1);
         energy_update_zone(0, ROW_KWH_Y, SML_FULL_W, ROW_KWH_H, buf, ST7735_CYAN, SML_S);
     }
 
-    /* ── COST  (GREEN, scale1) — "Rs9999.99" ─────────────────────────────── */
-    /* TGSPDCL CAT-2B rate applied to session kWh */
-    float cost = session_kwh * g_ev_rate_rs;
-    if (cost < 1000.0f)
-        snprintf(buf, sizeof(buf), "Rs%3.3f", cost);
-    else
-        snprintf(buf, sizeof(buf), "RS%3.1f", cost);
-    if (strcmp(buf, g_prev_cost) != 0) {
-        strncpy(g_prev_cost, buf, sizeof(g_prev_cost) - 1);
-        energy_update_zone(0, ROW_COST_Y, SML_FULL_W, ROW_COST_H, buf, ST7735_GREEN, VAL_S);
-    }
-
-    /* ── PF + Hz SPLIT  (RED | BLUE, scale1) ─────────────────────────────── */
+    /* PF + Hz SPLIT (RED | BLUE, scale1) */
     {
         uint8_t phy = ROW_PFHZ_Y + (ROW_PFHZ_H - FONT_H * SML_S) / 2;
-
         snprintf(buf, sizeof(buf), "%.2fPF", pf);
         if (strcmp(buf, g_prev_pf) != 0) {
             strncpy(g_prev_pf, buf, sizeof(g_prev_pf) - 1);
@@ -616,13 +596,10 @@ static void energy_draw_screen(float v, float a, float w,
         }
     }
 
-    /* ── TEMP + TIMER SPLIT  (ORANGE | WHITE, scale1) ──────────────────── */
-    /* Left: temperature from NTC ADC (0.5°C hysteresis)                    */
-    /* Right: session timer "MM:SS"                                          */
+    /* TEMP + TIMER SPLIT (ORANGE | WHITE, scale1) */
     {
         uint8_t tty = ROW_TEMPTMR_Y + (ROW_TEMPTMR_H - FONT_H * SML_S) / 2;
 
-        /* Temperature — 0.5°C hysteresis avoids continuous SPI for tiny noise */
         static float s_last_tc = -999.0f;
         float tc = adc_read_temp();
         if (tc > s_last_tc + 0.5f || tc < s_last_tc - 0.5f) {
@@ -633,7 +610,6 @@ static void energy_draw_screen(float v, float a, float w,
             ST7735_DrawString(TEMPTMR_TC_X, tty, buf, ST7735_ORANGE, ST7735_BLACK, SML_S);
         }
 
-        /* Timer "MM:SS" — rolls at 99:59 then wraps to 00:00 */
         uint32_t mm = (g_uptime_seconds / 60) % 100;
         uint32_t ss =  g_uptime_seconds % 60;
         snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)mm, (unsigned)ss);
@@ -645,30 +621,33 @@ static void energy_draw_screen(float v, float a, float w,
     }
 }
 
-/* ── Relay fire — 50ms coil pulse for latching relay ─────────────────────── */
-/* Ch8/P7 = ON coil,  Ch7/P8 = OFF coil */
-#define RELAY_CH_ON   8
-#define RELAY_CH_OFF  7
-
+/* ── energy_fire_relay — direct GPIO pulse on coil pins ──────────────────────
+ * FIX: HAL_PIN_SetOutputValue(pin, val) replaces CHANNEL_Set(ch, val, 0).
+ * CHANNEL_Set routes through OpenBK's channel abstraction. If Ch8/Ch7 are
+ * not configured as GPIO outputs in autoexec.cfg, it does nothing to any GPIO.
+ * HAL_PIN_SetOutputValue writes the pin directly — always works.
+ */
 static void energy_fire_relay(uint8_t turn_on)
 {
     if (turn_on) {
-        CHANNEL_Set(RELAY_CH_ON,  1, 0);
-        ST7735_Delay(200);               /* 50ms pulse — required for latching coil */
-        CHANNEL_Set(RELAY_CH_ON,  0, 0);
+        HAL_PIN_SetOutputValue(RELAY_PIN_ON,  1);   /* P7 HIGH — energise ON coil */
+        ST7735_Delay(RELAY_PULSE_MS);
+        HAL_PIN_SetOutputValue(RELAY_PIN_ON,  0);   /* P7 LOW  — release coil     */
         g_relay_state = 1;
     } else {
-        CHANNEL_Set(RELAY_CH_OFF, 1, 0);
-        ST7735_Delay(200);               /* 50ms pulse — required for latching coil */
-        CHANNEL_Set(RELAY_CH_OFF, 0, 0);
+        HAL_PIN_SetOutputValue(RELAY_PIN_OFF, 1);   /* P8 HIGH — energise OFF coil */
+        ST7735_Delay(RELAY_PULSE_MS);
+        HAL_PIN_SetOutputValue(RELAY_PIN_OFF, 0);   /* P8 LOW  — release coil      */
         g_relay_state = 0;
     }
-    g_prev_on[0] = '\0';   /* force status row redraw on next tick */
+    g_prev_on[0] = '\0';
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "Relay: %s", turn_on ? "ON" : "OFF");
+              "Relay: %s (P%d pulsed %dms)",
+              turn_on ? "ON" : "OFF",
+              turn_on ? RELAY_PIN_ON : RELAY_PIN_OFF,
+              RELAY_PULSE_MS);
 }
 
-/* ── Button callbacks (registered in energy_init) ──────────────────────── */
 static void on_btn1_press(void)   /* P28 [ON/OFF] — toggle relay */
 {
     energy_fire_relay(g_relay_state ? 0 : 1);
@@ -692,15 +671,21 @@ static void on_btn3_press(void)   /* P20 [−] — reserved */
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "Btn3(P20)[-] pressed");
 }
 
-/* ── energy_init — called from ST7735_Init ──────────────────────────────── */
 static void energy_init(void)
 {
     extern float HT7017_GetWh(void);
-    /* Snapshot meter reading so session starts at 0.00 kWh */
     g_ev_kwh_offset  = HT7017_GetWh() / 1000.0f;
     g_uptime_seconds = 0;
     g_relay_state    = 0;
     g_wifi_ok        = 0;
+
+    /* FIX: Set relay coil pins as outputs and pre-clear LOW.
+     * Without HAL_PIN_Setup_Output(), pins boot as INPUT on BK7231N.
+     * Writing to an INPUT pin has no effect — relay coil never fires. */
+    HAL_PIN_Setup_Output(RELAY_PIN_ON);
+    HAL_PIN_Setup_Output(RELAY_PIN_OFF);
+    HAL_PIN_SetOutputValue(RELAY_PIN_ON,  0);
+    HAL_PIN_SetOutputValue(RELAY_PIN_OFF, 0);
 
     memset(g_prev_v,    0, sizeof(g_prev_v));
     memset(g_prev_a,    0, sizeof(g_prev_a));
@@ -716,17 +701,15 @@ static void energy_init(void)
 
     energy_draw_static_frame();
 
-    /* Register buttons (calls Section G btn_register) */
-    btn_register(28, on_btn1_press);   /* P28 [ON/OFF] */
-    btn_register(26, on_btn2_press);   /* P26 [+] reset session */
-    btn_register(20, on_btn3_press);   /* P20 [−] reserved */
+    btn_register(28, on_btn1_press);
+    btn_register(26, on_btn2_press);
+    btn_register(20, on_btn3_press);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "Energy init  rate=%.2f Rs/kWh  offset=%.4f kWh",
               g_ev_rate_rs, g_ev_kwh_offset);
 }
 
-/* ── energy_tick — called every second from ST7735_RunEverySecond ─────── */
 static void energy_tick(void)
 {
     extern float HT7017_GetVoltage(void);
@@ -749,14 +732,14 @@ static void energy_tick(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * SECTION I — PUBLIC API  (WiFi / relay state setters called from scripts)
+ * SECTION I — PUBLIC API
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 void ST7735_SetWifiStatus(uint8_t connected)
 {
     if (g_wifi_ok != connected) {
         g_wifi_ok       = connected;
-        g_prev_wifi[0]  = '\0';   /* force redraw */
+        g_prev_wifi[0]  = '\0';
     }
 }
 
@@ -764,7 +747,7 @@ void ST7735_SetRelayState(uint8_t on)
 {
     if (g_relay_state != on) {
         g_relay_state = on;
-        g_prev_on[0]  = '\0';   /* force redraw */
+        g_prev_on[0]  = '\0';
     }
 }
 
@@ -860,9 +843,6 @@ static commandResult_t CMD_Wifi(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* st7735_relay 1/0 — for OpenBK script rules:
- *   on ch8=1 do st7735_relay 1 endon
- *   on ch7=1 do st7735_relay 0 endon */
 static commandResult_t CMD_Relay(const void *ctx, const char *cmd,
                                  const char *args, int flags)
 {
@@ -880,7 +860,6 @@ static commandResult_t CMD_ResetTimer(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ev_rate <float>  — set Rs/kWh tariff */
 static commandResult_t CMD_EvRate(const void *ctx, const char *cmd,
                                   const char *args, int flags)
 {
@@ -896,18 +875,15 @@ static commandResult_t CMD_EvRate(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ev_reset — snapshot current meter, zero timer */
 static commandResult_t CMD_EvReset(const void *ctx, const char *cmd,
                                    const char *args, int flags)
 {
-    on_btn2_press();   /* reuse same logic as [+] button */
+    on_btn2_press();
     return CMD_RES_OK;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * SECTION K — OPENBK LIFECYCLE
- * Only ST7735_Init() and ST7735_RunEverySecond() are called by drv_main.c.
- * All module init and tick calls chain from here.
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 void ST7735_Init(void)
@@ -924,7 +900,6 @@ void ST7735_Init(void)
               "ST7735: SCK=%d SDA=%d RES=%d DC=%d CS=%d BLK=%d",
               g_pin_sck, g_pin_sda, g_pin_res, g_pin_dc, g_pin_cs, g_pin_blk);
 
-    /* ── TFT hardware init ────────────────────────────────────────────────── */
     HAL_PIN_Setup_Output(g_pin_sck);
     HAL_PIN_Setup_Output(g_pin_sda);
     HAL_PIN_Setup_Output(g_pin_res);
@@ -933,7 +908,7 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_blk);
 
     SPI_CS_H(); SPI_SCK_L(); SPI_SDA_L(); SPI_DC_H(); SPI_RES_H();
-    SPI_BLK_L();           /* backlight ON (active-low on KWS-303WF) */
+    SPI_BLK_L();
     ST7735_Delay(50);
 
     TFT_HardReset();
@@ -941,10 +916,8 @@ void ST7735_Init(void)
     g_initialized = 1;
     ST7735_FillScreen(ST7735_BLACK);
 
-    /* ── Energy + button module init (order matters: energy calls btn_register) */
-    energy_init();         /* draws static labels, registers button callbacks */
+    energy_init();
 
-    /* ── Register console commands ─────────────────────────────────────────── */
     CMD_RegisterCommand("st7735_clear",      CMD_Clear,      NULL);
     CMD_RegisterCommand("st7735_brightness", CMD_Brightness, NULL);
     CMD_RegisterCommand("st7735_goto",       CMD_Goto,       NULL);
@@ -966,8 +939,8 @@ void ST7735_Init(void)
 void ST7735_RunEverySecond(void)
 {
     if (!g_initialized) return;
-    btn_tick();       /* Section G — poll buttons, fire callbacks on press */
-    energy_tick();    /* Section H — read HT7017 + ADC, update screen */
+    btn_tick();
+    energy_tick();
 }
 
 void ST7735_AppendInformationToHTTPIndexPage(http_request_t *request)
@@ -980,7 +953,7 @@ void ST7735_AppendInformationToHTTPIndexPage(http_request_t *request)
         if (session_kwh < 0.0f) session_kwh = 0.0f;
     }
     snprintf(tmp, sizeof(tmp),
-        "<h5>ST7735 TFT — EV Energy Monitor</h5>"
+        "<h5>ST7735 TFT - EV Energy Monitor</h5>"
         "<table border='1' cellpadding='4' style='border-collapse:collapse'>"
         "<tr><td>Display</td><td>%s</td></tr>"
         "<tr><td>Size</td><td>80x160 RGB565</td></tr>"
