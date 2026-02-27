@@ -654,12 +654,12 @@ static void energy_fire_relay(uint8_t turn_on)
 {
     if (turn_on) {
         CHANNEL_Set(RELAY_CH_ON,  1, 0);
-        ST7735_Delay(50);               /* 50ms pulse — required for latching coil */
+        ST7735_Delay(100);               /* 50ms pulse — required for latching coil */
         CHANNEL_Set(RELAY_CH_ON,  0, 0);
         g_relay_state = 1;
     } else {
         CHANNEL_Set(RELAY_CH_OFF, 1, 0);
-        ST7735_Delay(50);               /* 50ms pulse — required for latching coil */
+        ST7735_Delay(100);               /* 50ms pulse — required for latching coil */
         CHANNEL_Set(RELAY_CH_OFF, 0, 0);
         g_relay_state = 0;
     }
