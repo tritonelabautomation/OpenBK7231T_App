@@ -73,6 +73,16 @@
 #define HT7017_DEFAULT_CURRENT_OFFSET   500
 #endif
 
+#define HT7017_CHANNEL_VOLTAGE      10
+#define HT7017_CHANNEL_CURRENT      11
+#define HT7017_CHANNEL_POWER        12
+#define HT7017_CHANNEL_FREQ         13
+#define HT7017_CHANNEL_PF           14
+#define HT7017_CHANNEL_REACTIVE     15   // Q1 reactive power (VAR)
+#define HT7017_CHANNEL_APPARENT     16   // S1 apparent power (VA)
+#define HT7017_CHANNEL_WH           17   // active energy total (Wh * 1000)
+#define HT7017_CHANNEL_VARH         18   // reactive energy total (VARh * 1000)
+
 /* ── Lifecycle ──────────────────────────────────────────────────────────── */
 void     HT7017_Init(void);          /* Call once at startup (waits 15ms)   */
 void     HT7017_RunQuick(void);      /* Call from UART ISR or fast loop      */
