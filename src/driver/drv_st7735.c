@@ -566,10 +566,10 @@ static void energy_draw_screen(float v, float a, float w,
     float session_kwh = kwh_meter - g_ev_kwh_offset;
     if (session_kwh < 0.0f) session_kwh = 0.0f;
     float cost = session_kwh * g_ev_rate_rs;
-    snprintf(buf, sizeof(buf), "Rs%7.2f", cost);
+    snprintf(buf, sizeof(buf), "Rs%4.2f", cost);
     if (strcmp(buf, g_prev_cost) != 0) {
         strncpy(g_prev_cost, buf, sizeof(g_prev_cost) - 1);
-        energy_update_zone(0, ROW_COST_Y, SML_FULL_W, ROW_COST_H, buf, ST7735_GREEN, SML_S);
+        energy_update_zone(0, ROW_COST_Y, SML_FULL_W, ROW_COST_H, buf, ST7735_GREEN, VAL_S);
     }
 
     /* kWh (CYAN, scale1) */
