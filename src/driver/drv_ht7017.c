@@ -703,3 +703,50 @@ uint32_t HT7017_ReadChipID(void)
     }
     return 0;
 }
+
+void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
+{
+    uint32_t now     = NTP_GetCurrentTime();
+    uint32_t since   = (g_energy_reset_unix > 0) ? g_energy_reset_unix
+                                                  : g_session_start_unix;
+    uint32_t elapsed = (now > since && since > 0) ? (now - since) : 0;
+    uint32_t days    = elapsed / 86400;
+    uint32_t hrs     = (elapsed % 86400) / 3600;
+    uint32_t mins    = (elapsed % 3600)  / 60;
+
+    char tmp[1200];
+    snprintf(tmp, sizeof(tmp),
+        "<h5>HT7017 v11 - KWS-303WF</h5>"
+        "<table border='1' cellpadding='4' style='border-collapse:collapse'>"
+        "<tr><th>Parameter</th><th>Value</th></tr>"
+        "<tr><td>Voltage</td><td><b>%.2f V</b></td></tr>"
+        "<tr><td>Current</td><td><b>%.3f A</b></td></tr>"
+        "<tr><td>Frequency</td><td><b>%.3f Hz</b></td></tr>"
+        "<tr><td>Active Power</td><td><b>%.2f W</b></td></tr>"
+        "<tr><td>Reactive Power</td><td><b>%.2f VAR</b></td></tr>"
+        "<tr><td>Apparent (V*I)</td><td><b>%.2f VA</b></td></tr>"
+        "<tr><td>Apparent (S1)</td><td><b>%.2f VA</b></td></tr>"
+        "<tr><td>Power Factor</td><td><b>%.4f</b></td></tr>"
+        "<tr><td>Active Energy</td><td><b>%.4f Wh (%.5f kWh)</b></td></tr>"
+        "<tr><td>Reactive Energy</td><td><b>%.4f VARh</b></td></tr>"
+        "<tr><td>Session</td><td><b>%ud %02uh %02um</b></td></tr>"
+        "<tr><td colspan='2' style='font-size:0.8em;color:#666'>"
+          "good=%u bad=%u miss=%u tx=%u | "
+          "V=%.0f I=%.0f P=%.3f Q=%.3f S=%.3f EP=%.3f"
+        "</td></tr>"
+        "</table>",
+        g_voltage, g_current, g_freq,
+        g_power, g_reactive,
+        g_apparent, g_apparent_s1,
+        g_power_factor,
+        g_wh_total, g_wh_total / 1000.0f,
+        g_varh_total,
+        days, hrs, mins,
+        g_goodFrames, g_badFrames, g_totalMisses, g_txCount,
+        g_vScale, g_iScale, g_pScale, g_qScale, g_sScale, g_e1Scale);
+
+    strncat(request->reply, tmp,
+            sizeof(request->reply) - strlen(request->reply) - 1);
+}
+
+
