@@ -75,9 +75,10 @@
 
 /* ── Lifecycle ──────────────────────────────────────────────────────────── */
 void     HT7017_Init(void);          /* Call once at startup (waits 15ms)   */
-void     HT7017_RunEverySecond(void);/* Call from 1-Hz task scheduler        */
 void     HT7017_RunQuick(void);      /* Call from UART ISR or fast loop      */
-void     HT7017_SoftReset(void);     /* Issues software reset, re-inits      */
+void     HT7017_RunEverySecond(void);/* Call from 1-Hz task scheduler        */
+void     HT7017_AppendInformationToHTTPIndexPage(http_request_t *request);
+//void     HT7017_SoftReset(void);     /* Issues software reset, re-inits      */
 uint32_t HT7017_ReadChipID(void);    /* Blocking; returns 0x7053F0 if OK    */
 
 /* ── Measurement getters ────────────────────────────────────────────────── */
