@@ -1,79 +1,133 @@
+#pragma once
+#ifndef __DRV_HT7017_H__
+#define __DRV_HT7017_H__
+
 /*
- * drv_ht7017.h  –  HT7017 energy metering IC driver  v12
- *
- * All register addresses, formulas, and flag behaviour verified against:
- *   HT7017 User Manual Rev1.3 (20000:1 variant)
- *   datasheet: https://datasheet.lcsc.com/lcsc/...HT7017-TR_C81511.pdf
- *
- * Hardware: BK7231N (CBU module) UART1 RX1/TX1 ↔ HT7017
- *           KWS-303WF, 300 µΩ manganin shunt, 40 A max
- *
- * ── Calibration constants: override via -D or edit defaults in .c ──────────
- *
- *   HT7017_DEFAULT_VOLTAGE_SCALE   counts / V    (empirical, typically 150-250)
- *   HT7017_DEFAULT_CURRENT_SCALE   counts / A    (empirical, typically 800-3000)
- *   HT7017_DEFAULT_POWER_SCALE     counts / W    (empirical, typically 1000-10000)
- *   HT7017_DEFAULT_ENERGY_SCALE    counts / Wh   (empirical, must measure over 1h)
- *   HT7017_DEFAULT_CURRENT_OFFSET  raw counts @ zero current (typ 100-2000)
- *
- * ── Frequency formula (verified from datasheet §5.1.2.4) ──────────────────
- *
- *   femu = 1 MHz (Emuclk_Sel=1, chip default)
- *   OSR  = 64   (chip default)
- *   Frequency = (femu × 32) / (OSR × Freq_U_raw)
- *             = (1,000,000 × 32) / (64 × raw)
- *             = 500,000 / raw
- *
- *   raw = 0x2710 (10000) → 500000/10000 = 50.0 Hz  ✓ (chip default at 50Hz)
- *   raw = 8333            → 500000/8333  = 60.0 Hz  ✓ (60Hz grid)
- *
- * ── Register map highlights (§5.1) ────────────────────────────────────────
- *   0x06 Rms_I1  – RMS current ch1 (unsigned 24-bit)
- *   0x07 Rms_I2  – RMS current ch2 (unsigned 24-bit)
- *   0x08 Rms_U   – RMS voltage     (unsigned 24-bit)
- *   0x09 Freq_U  – Frequency counter (16-bit, reset=0x2710)
- *   0x0A PowerP1 – Active power ch1  (signed 24-bit)
- *   0x0B PowerQ1 – Reactive power ch1 (signed 24-bit)
- *   0x0C PowerS  – Apparent power    (signed 24-bit, always positive in practice)
- *   0x0D EnergyP – Active energy accumulator (unsigned 24-bit, no auto-clear)
- *   0x0E EnergyQ – Reactive energy accumulator (unsigned 24-bit)
- *   0x10 PowerP2 – Active power ch2  (NOT a PFCNT register – PFCNT does not
- *                  exist as a standalone read register in this chip)
- *   0x11 PowerQ2 – Reactive power ch2 (signed 24-bit)
- *   0x13 EnergyP_Bak – Backup register (4 bytes, requires broadcast cmd)
- *   0x14 EnergyQ_Bak – Backup register (4 bytes, requires broadcast cmd)
- *   0x1B ChipID  – Expected 0x7053F0
- *   0x1D EnergyP_Neg – Reverse active energy (unsigned 24-bit)
- *   0x1E EnergyQ_Neg – Reverse reactive energy (unsigned 24-bit)
- *   0x32 WPREG   – Write-protect (0xBC unlocks low, 0xA6 unlocks high, 0x00 locks)
- *   0x33 SRSTREG – Software reset: write 0x55
- *   0x59 ADCCON  – ADC gain (must write once after reset for energy reliability §3.11)
+ * ╔══════════════════════════════════════════════════════════════════════════════╗
+ * ║         HT7017 Energy Metering IC — Driver for KWS-303WF  v11             ║
+ * ╠══════════════════════════════════════════════════════════════════════════════╣
+ * ║  DEVICE  : KWS-303WF Smart Energy Meter                                   ║
+ * ║  SOC     : BK7231N CBU module                                              ║
+ * ║  ARCH    : BK7231N → UART1 (4800 8E1) → HT7017 direct  (no MCU between)  ║
+ * ║  SENSING : Metal shunt strip ~0.5–1mΩ  (not current transformer)          ║
+ * ║                                                                            ║
+ * ║  WIRING  : BK7231N P0(RX1) ←── HT7017 TX                                 ║
+ * ║            BK7231N P1(TX1) ──[Diode]──► HT7017 RX                        ║
+ * ║                                                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════════╣
+ * ║  PROTOCOL                                                                  ║
+ * ║    4800 baud, 8E1, half-duplex                                             ║
+ * ║    Request  → [0x6A][REG]              2 bytes                            ║
+ * ║    Response ← [D2][D1][D0][CHECKSUM]   4 bytes                            ║
+ * ║    Raw 24-bit: (D2<<16)|(D1<<8)|D0  MSB first                             ║
+ * ║    CS: ~(0x6A + REG + D2 + D1 + D0) & 0xFF                                ║
+ * ║                                                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════════╣
+ * ║  REGISTER MAP (polled)                                                     ║
+ * ║    0x06  I1RMS    Current ch1 RMS      unsigned                           ║
+ * ║    0x08  URMS     Voltage RMS          unsigned                           ║
+ * ║    0x09  FREQ     Line frequency       unsigned  period counter           ║
+ * ║    0x0A  P1       Active power ch1     SIGNED 24-bit 2's complement       ║
+ * ║    0x0B  Q1       Reactive power ch1   SIGNED 24-bit 2's complement       ║
+ * ║    0x0C  S1       Apparent power ch1   unsigned  own scale                ║
+ * ║    0x10  PFCNT1   PF count ch1         unsigned  raw counter              ║
+ * ║    0x13  EP1      Active energy ch1    unsigned  accumulator              ║
+ * ║    0x14  EQ1      Reactive energy ch1  unsigned  accumulator              ║
+ * ║                                                                            ║
+ * ║  FREQ NOTE: period counter — at 50Hz raw~10000, scale=200.0               ║
+ * ║  ⚠ P1/Q1 SIGNED: 0xFFFFFF=-1=~0W. Not 16,777,215!                        ║
+ * ║                                                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════════╣
+ * ║  CALIBRATION HISTORY                                                       ║
+ * ║    Voltage  ✓ 10-point 2026-02-23  ±0.16%                                 ║
+ * ║    Current  ✓ 10-point 2026-02-23  ±0.11%                                 ║
+ * ║    Power    ✓ 10-point 2026-02-23  ±0.22%                                 ║
+ * ║    Freq     ✓ derived from log     ±0.03Hz                                ║
+ * ║    Reactive ⚠ same scale as P1 (approximate until calibrated)             ║
+ * ║    Apparent ⚠ needs S1 calibration: S_actual=V*I, S_scale=raw/S_actual   ║
+ * ║    Energy   ⚠ scale=1.0 (raw counts) — calibrate with known load+time    ║
+ * ║                                                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════════╣
+ * ║  ROTATION: 12 slots × 1s = 12s full cycle                                 ║
+ * ║    V  I  P  Q  S  PFCNT  F  EP1  EQ1  V  I  F                            ║
+ * ║    (V, I, F repeated — updated every 6s instead of 12s)                   ║
+ * ║                                                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════════╣
+ * ║  CONSOLE COMMANDS                                                          ║
+ * ║    VoltageSet <V>          recalibrate voltage scale (runtime)             ║
+ * ║    CurrentSet <A>          recalibrate current scale (runtime)             ║
+ * ║    PowerSet <W>            recalibrate power scale (runtime)               ║
+ * ║    HT7017_Status           full measurement + scale dump                  ║
+ * ║    HT7017_Energy           kWh, kVARh, session time (NTP)                 ║
+ * ║    HT7017_Energy_Reset     zero energy counters, record NTP timestamp     ║
+ * ║    HT7017_Baud <rate>      change UART baud rate                          ║
+ * ║    HT7017_NoParity         switch to 8N1                                  ║
+ * ║                                                                            ║
+ * ║  BUILD RULES                                                               ║
+ * ║    No channel.h  |  No powerMeasurementCalibration  |  No CFG_SetExtended ║
+ * ╚══════════════════════════════════════════════════════════════════════════════╝
  */
 
-#ifndef DRV_HT7017_H
-#define DRV_HT7017_H
-
-#include <stdint.h>
-#include <stdbool.h>
+#include "../new_common.h"
 #include "../httpserver/new_http.h"
 
+// ─── UART ─────────────────────────────────────────────────────────────────────
+#define HT7017_BAUD_RATE            4800
+#define HT7017_PARITY_EVEN          2
 
-/* ── Calibration defaults (override via compiler -D flags) ────────────── */
-#ifndef HT7017_DEFAULT_VOLTAGE_SCALE
-#define HT7017_DEFAULT_VOLTAGE_SCALE    200.0f
-#endif
-#ifndef HT7017_DEFAULT_CURRENT_SCALE
-#define HT7017_DEFAULT_CURRENT_SCALE    1500.0f
-#endif
-#ifndef HT7017_DEFAULT_POWER_SCALE
-#define HT7017_DEFAULT_POWER_SCALE      5000.0f
-#endif
-#ifndef HT7017_DEFAULT_ENERGY_SCALE
-#define HT7017_DEFAULT_ENERGY_SCALE     100.0f
-#endif
-#ifndef HT7017_DEFAULT_CURRENT_OFFSET
-#define HT7017_DEFAULT_CURRENT_OFFSET   500
-#endif
+// ─── Protocol ─────────────────────────────────────────────────────────────────
+#define HT7017_FRAME_HEAD           0x6A
+#define HT7017_RESPONSE_LEN         4
+
+// ─── Register addresses ───────────────────────────────────────────────────────
+#define HT7017_REG_RMS_I1           0x06
+#define HT7017_REG_RMS_U            0x08
+#define HT7017_REG_FREQ             0x09
+#define HT7017_REG_POWER_P1         0x0A    // SIGNED
+#define HT7017_REG_POWER_Q1         0x0B    // SIGNED — reactive power
+#define HT7017_REG_POWER_S1         0x0C    // unsigned — apparent power
+#define HT7017_REG_PFCNT1           0x10    // unsigned — PF count ch1
+#define HT7017_REG_EP1              0x13    // unsigned — active energy accum
+#define HT7017_REG_EQ1              0x14    // unsigned — reactive energy accum
+#define HT7017_REG_EMUSR            0x19    // status flags
+
+// ─── Calibrated scale factors — v10 (10-point calibration 2026-02-23) ────────
+#define HT7017_DEFAULT_VOLTAGE_SCALE    10961.98f   // ±0.16%
+#define HT7017_DEFAULT_CURRENT_SCALE    1661.41f    // ±0.11%
+#define HT7017_DEFAULT_POWER_SCALE      -3.1777f    // ±0.22% (negative: signed raw negative for real power)
+#define HT7017_DEFAULT_FREQ_SCALE       200.0f      // 50Hz grid: raw~10000
+
+// Current shunt DC offset — raw counts at zero current (no-load baseline)
+// Subtracted before current scaling. Re-measure after hardware change.
+#define HT7017_CURRENT_OFFSET           440.0f
+
+// ─── New v11 scale factors ────────────────────────────────────────────────────
+
+// Reactive power Q1 — same signed convention as P1.
+// Initial value = same as P1 scale (reasonable starting approximation).
+// Refine: connect inductive load, read Q1 raw, measure VAR with power meter,
+// then: Q_SCALE = signed_raw_Q1 / actual_VAR
+#define HT7017_DEFAULT_REACTIVE_SCALE   HT7017_DEFAULT_POWER_SCALE
+
+// Apparent power S1 — UNSIGNED, different raw units from P1.
+// Calibrate: run any load, S_actual = V_actual * I_actual
+// then: S_SCALE = raw_S1 / S_actual
+// Default 1.0 shows raw counts — will be large numbers until calibrated.
+#define HT7017_DEFAULT_APPARENT_SCALE   1.0f
+
+// Energy accumulator scale EP1/EQ1 — converts raw delta to Wh/VARh.
+// Default 1.0 = raw counts shown as Wh (not correct until calibrated).
+// Calibrate: run known load P watts for T hours, observe raw_delta:
+//   EP1_SCALE = raw_delta / (P * T / 3600)  →  raw_delta / actual_Wh
+// Once EP1_SCALE is set the displayed kWh will be accurate.
+#define HT7017_DEFAULT_EP1_SCALE        1.0f
+
+// ─── OpenBeken channel mapping ────────────────────────────────────────────────
+// All values published as integer * 100 (e.g. 22751 = 227.51V).
+// Configure matching channels in OpenBeken as "divided by 100".
+// Energy channels (WH, VARH) published as integer * 1000 (e.g. 1234 = 1.234Wh).
+// Configure those as "divided by 1000".
+// Set to 0 to disable publishing for that channel.
 
 #define HT7017_CHANNEL_VOLTAGE      10
 #define HT7017_CHANNEL_CURRENT      11
@@ -85,38 +139,30 @@
 #define HT7017_CHANNEL_WH           17   // active energy total (Wh * 1000)
 #define HT7017_CHANNEL_VARH         18   // reactive energy total (VARh * 1000)
 
-/* ── Lifecycle ──────────────────────────────────────────────────────────── */
-void     HT7017_Init(void);          /* Call once at startup (waits 15ms)   */
-void     HT7017_RunQuick(void);      /* Call from UART ISR or fast loop      */
-void     HT7017_RunEverySecond(void);/* Call from 1-Hz task scheduler        */
+// ─── Behaviour ────────────────────────────────────────────────────────────────
+#define HT7017_MAX_MISS_COUNT       3
+
+// ─── Public API — v10 ─────────────────────────────────────────────────────────
+void     HT7017_Init(void);
+void     HT7017_RunQuick(void);
+void     HT7017_RunEverySecond(void);
 void     HT7017_AppendInformationToHTTPIndexPage(http_request_t *request);
-//void     HT7017_SoftReset(void);     /* Issues software reset, re-inits      */
-uint32_t HT7017_ReadChipID(void);    /* Blocking; returns 0x7053F0 if OK    */
 
-/* ── Measurement getters ────────────────────────────────────────────────── */
-float    HT7017_GetVoltage(void);    /* V RMS                               */
-float    HT7017_GetCurrent(void);    /* A RMS                               */
-float    HT7017_GetPower(void);      /* W  (active, signed)                 */
-float    HT7017_GetReactive(void);   /* VAR (reactive, signed)              */
-float    HT7017_GetApparent(void);   /* VA  (apparent, always ≥0)           */
-float    HT7017_GetPowerFactor(void);/* -1..+1                              */
-float    HT7017_GetFreq(void);       /* Hz (50 or 60)                       */
-float    HT7017_GetEnergyWh(void);   /* Wh  (accumulated, wraps-safe)       */
-float    HT7017_GetEnergyVARh(void); /* VARh (accumulated)                  */
+float    HT7017_GetVoltage(void);
+float    HT7017_GetCurrent(void);
+float    HT7017_GetPower(void);
+float    HT7017_GetFrequency(void);
+float    HT7017_GetPowerFactor(void);
+float    HT7017_GetApparentPower(void);
+uint32_t HT7017_GetGoodFrames(void);
+uint32_t HT7017_GetBadFrames(void);
+uint32_t HT7017_GetTxCount(void);
+uint32_t HT7017_GetMissCount(void);
 
-/* ── Calibration commands ───────────────────────────────────────────────── */
-/* Call each after polling has captured at least one raw reading.           */
-/* Use purely resistive load (incandescent / heater) for best accuracy.     */
+// ─── Public API — v11 (new) ───────────────────────────────────────────────────
+float    HT7017_GetReactivePower(void);
+float    HT7017_GetApparentS1(void);
+float    HT7017_GetWh(void);
+float    HT7017_GetVARh(void);
 
-void     HT7017_VoltageSet(float actual_vrms);   /* Set V scale             */
-void     HT7017_CurrentSet(float actual_arms);   /* Set I scale             */
-void     HT7017_CurrentOffsetSet(void);           /* Set I offset @ zero A   */
-void     HT7017_PowerSet(float actual_watts);    /* Set P scale (and Q, S)  */
-void     HT7017_ReactiveSet(float actual_var);   /* Set Q scale independently*/
-void     HT7017_EnergyReset(void);               /* Zero Wh/VARh counters   */
-void     HT7017_EnergyScaleSet(float wh_per_count); /* Set after 1h test    */
-
-/* ── Debug ──────────────────────────────────────────────────────────────── */
-void     HT7017_PrintStatus(void);   /* Dump all values + scales to UART    */
-
-#endif /* DRV_HT7017_H */
+#endif // __DRV_HT7017_H__
