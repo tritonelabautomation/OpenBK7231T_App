@@ -443,18 +443,18 @@ static void btn_tick(void)
 #define ROW_STATUS_H   10
 #define ROW_V_Y        11      /* 1px natural black gap at Y=10 */
 #define ROW_V_H        24
-#define ROW_A_Y        35      /* 11+29 */
+#define ROW_A_Y        35     
 #define ROW_A_H        24
-#define ROW_W_Y        59      /* 40+29 */
+#define ROW_W_Y        59      
 #define ROW_W_H        24
-#define ROW_COST_Y     83      /* 98+15 */
+#define ROW_COST_Y     83      
 #define ROW_COST_H     23
-#define ROW_KWH_Y     106      /* 69+29 */
+#define ROW_KWH_Y     106      
 #define ROW_KWH_H      18
-#define ROW_PFHZ_Y    124      /* 113+15 */
+#define ROW_PFHZ_Y    124      
 #define ROW_PFHZ_H     18
-#define ROW_TEMPTMR_Y 142      /* 128+15 */
-#define ROW_TEMPTMR_H  18      /* 143+17=160 ✓ */
+#define ROW_TEMPTMR_Y 142      
+#define ROW_TEMPTMR_H  18      
 
 #define VAL_S   2    /* large scale: 12px/ch wide, 14px tall */
 #define SML_S   1    /* small scale:  6px/ch wide,  7px tall */
@@ -487,7 +487,7 @@ static void btn_tick(void)
 
 /* ── EV session state ─────────────────────────────────────────────────────── */
 /* TGSPDCL CAT-2B: Rs 3.75/unit is the 201-300 slab marginal rate (2024-25). */
-#define EV_DEFAULT_RATE_RS  3.75f    /* Rs per kWh — TGSPDCL CAT-2B 201-300 slab */
+#define EV_DEFAULT_RATE_RS  7.7f    /* Rs per kWh — TGSPDCL CAT-2B 201-300 slab */
 
 static float    g_ev_rate_rs     = EV_DEFAULT_RATE_RS;
 static float    g_ev_kwh_offset  = 0.0f;   /* meter reading at session start */
