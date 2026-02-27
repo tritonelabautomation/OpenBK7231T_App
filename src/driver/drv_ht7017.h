@@ -31,8 +31,8 @@
  * ║    0x0B  Q1       Reactive power ch1   SIGNED 24-bit 2's complement       ║
  * ║    0x0C  S1       Apparent power ch1   unsigned  own scale                ║
  * ║    0x10  PFCNT1   PF count ch1         unsigned  raw counter              ║
- * ║    0x13  EP1      Active energy ch1    unsigned  accumulator              ║
- * ║    0x14  EQ1      Reactive energy ch1  unsigned  accumulator              ║
+ * ║    0x0D  EP1      Active energy ch1    unsigned  accumulator              ║
+ * ║    0x0E  EQ1      Reactive energy ch1  unsigned  accumulator              ║
  * ║                                                                            ║
  * ║  FREQ NOTE: period counter — at 50Hz raw~10000, scale=200.0               ║
  * ║  ⚠ P1/Q1 SIGNED: 0xFFFFFF=-1=~0W. Not 16,777,215!                        ║
@@ -87,8 +87,8 @@
 #define HT7017_REG_POWER_Q1         0x0B    // SIGNED — reactive power
 #define HT7017_REG_POWER_S1         0x0C    // unsigned — apparent power
 #define HT7017_REG_PFCNT1           0x10    // unsigned — PF count ch1
-#define HT7017_REG_EP1              0x13    // unsigned — active energy accum
-#define HT7017_REG_EQ1              0x14    // unsigned — reactive energy accum
+#define HT7017_REG_EP1              0x0D    // unsigned — active energy accum
+#define HT7017_REG_EQ1              0x0E    // unsigned — reactive energy accum
 #define HT7017_REG_EMUSR            0x19    // status flags
 
 // ─── Calibrated scale factors — v10 (10-point calibration 2026-02-23) ────────
