@@ -38,8 +38,8 @@
  *      "peak_w":548.0,
  *      "peak_a":2.380
  *    }
- *    Uses OpenBeken MQTT_PublishMessage() — works with existing broker config.
- *    No separate MQTT credentials needed — uses whatever is in OBK settings.
+ *    Uses CMD_ExecuteCommand("publishMQTT ...") — no extra header needed.
+ *    Works with existing broker config in OBK settings.
  *
  *  ALL v17 changes preserved:
  *    verbose logging flag, EV session persistence, power-cut resume,
@@ -58,7 +58,6 @@
 #include "../new_cfg.h"
 #include "../new_pins.h"
 #include "../cmnds/cmd_public.h"
-#include "../mqtt/mqtt.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -523,8 +522,12 @@ static void HT7017_MqttPublishSession(void)
         (unsigned)g_ev.segment_count,
         g_ev.peak_power_w, g_ev.peak_current_a);
 
-    // MQTT_PublishMessage(topic, payload, retain)
-    MQTT_PublishMessage(HT7017_MQTT_TOPIC, payload, 1);
+    // Use OBK's built-in publishMQTT command — no extra header needed.
+    // Format: publishMQTT <topic> <payload>
+    // OpenBeken routes this through its existing MQTT broker connection.
+    char cmd[400];
+    snprintf(cmd, sizeof(cmd), "publishMQTT %s %s", HT7017_MQTT_TOPIC, payload);
+    CMD_ExecuteCommand(cmd, 0);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "HT7017: MQTT published to %s", HT7017_MQTT_TOPIC);
