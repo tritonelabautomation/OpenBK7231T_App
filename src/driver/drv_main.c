@@ -536,6 +536,14 @@ static driver_t g_drivers[] = {
 	false, 
     },
 #endif
+#if ENABLE_DRIVER_KWS303WF 
+	{"KWS303WF",                  
+    KWS303WF_Init,               
+    KWS303WF_RunEverySecond,    
+    NULL,                       
+    NULL,                       
+     },                              
+ #endif                             
 #if ENABLE_DRIVER_PWM_GROUP
 	//drvdetail:{"name":"PWMG",
 	//drvdetail:"title":"TODO",
