@@ -104,12 +104,13 @@
 #define KWS_BTN_RESERVED     20       /* P20 — reserved                       */
 
 /* NTC */
-#define KWS_ADC_CH            3       /* BK7231N ADC ch3 = P23                */
+#define KWS_ADC_CH            23       /* BK7231N ADC ch3 = P23                */
 #define KWS_ADC_MAX        4095.0f
 #define KWS_NTC_R25       10000.0f
 #define KWS_NTC_B          3950.0f
 #define KWS_NTC_RS        10000.0f
 #define KWS_NTC_T0K        298.15f
+#define KWS_NTC_PULLUP         1         /* 1 → Vcc→NTC→pin→Rs→GND */
 
 /* OBK channels written by this driver */
 #define KWS_CH_RELAY          8
@@ -193,9 +194,13 @@ static float ntc_celsius(void)
     if (raw == 0)                    return -99.0f;
     if (raw >= (uint32_t)KWS_ADC_MAX) return 999.0f;
     float r    = (float)raw;
-    float rntc = KWS_NTC_RS * r / (KWS_ADC_MAX - r);
-    float tk   = 1.0f / (1.0f/KWS_NTC_T0K + logf(rntc/KWS_NTC_R25)/KWS_NTC_B);
-    return tk - 273.15f;
+#if KWS_NTC_PULLUP
+    float rntc = NTC_RS * r / (ADC_MAX_VAL - r);         /* NTC is pull-up */
+#else
+    float rntc = NTC_RS * (ADC_MAX_VAL - r) / r;         /* Rs is pull-up  */
+#endif
+    float temp_k = 1.0f / (1.0f / NTC_T0_K + logf(rntc / NTC_R25) / NTC_B);
+    return temp_k - 273.15f;
 }
 
 /* ============================================================================
