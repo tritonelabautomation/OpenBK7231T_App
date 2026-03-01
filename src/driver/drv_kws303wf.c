@@ -195,11 +195,11 @@ static float ntc_celsius(void)
     if (raw >= (uint32_t)KWS_ADC_MAX) return 999.0f;
     float r    = (float)raw;
 #if KWS_NTC_PULLUP
-    float rntc = KW_NTC_RS * r / (KWS_ADC_MAX - r);         /* NTC is pull-up */
+    float rntc = KWS_NTC_RS * r / (KWS_ADC_MAX - r);         /* NTC is pull-up */
 #else
-    float rntc = KW_NTC_RS * (KWS_ADC_MAX - r) / r;         /* Rs is pull-up  */
+    float rntc = KWD_NTC_RS * (KWS_ADC_MAX - r) / r;         /* Rs is pull-up  */
 #endif
-    float temp_k = 1.0f / (1.0f / KWS_NTC_T0K + logf(rntc / NTC_R25) / NTC_B);
+    float temp_k = 1.0f / (1.0f / KWS_NTC_T0K + logf(rntc / KWS_NTC_R25) / KWS_NTC_B);
     return temp_k - 273.15f;
 }
 
