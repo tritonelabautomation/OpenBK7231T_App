@@ -94,8 +94,8 @@
 #define KWS_SPLIT_W         4500.0f   /* below=2W(Rizta), above=4W(Nexon)    */
 
 /* Relay hardware */
-#define KWS_RELAY_PIN_ON      8       /* P7 = ON coil  — closes contact       */
-#define KWS_RELAY_PIN_OFF     7       /* P8 = OFF coil — opens contact (safe) */
+#define KWS_RELAY_PIN_ON      7       /* P7 = ON coil  — closes contact       */
+#define KWS_RELAY_PIN_OFF     8       /* P8 = OFF coil — opens contact (safe) */
 #define KWS_RELAY_PULSE_MS  200       /* coil energise duration ms            */
 
 /* Buttons */
@@ -144,38 +144,65 @@ static int ReadCh(int ch)
 
 /* ============================================================================
  * SECTION C — RELAY  (sole owner of P7 and P8 GPIO)
+ *
+ * Non-blocking coil pulse:
+ *   relay_open() / relay_close() energize the coil pin immediately and
+ *   record which tick to de-energize it on.  relay_pulse_tick(), called at
+ *   the TOP of RunEverySecond(), de-energizes the coil when the time comes.
+ *   A latching relay needs only ~50 ms to latch; one full second is safe.
+ *   This removes the 200 ms rtos_delay_milliseconds() blocking call that
+ *   was previously stalling the OBK main task on every relay transition.
  * ============================================================================ */
-static uint8_t g_relay_closed = 0;
+static uint8_t  g_relay_closed = 0;
+static uint8_t  g_pulse_pin    = 0;    /* 0 = no pulse active */
+static uint32_t g_pulse_off_at = 0;    /* g_uptime_s value when to de-energize */
 
-static void relay_pulse(int pin)
+/* Call at the TOP of RunEverySecond — de-energize coil when window expires */
+static void relay_pulse_tick(void)
 {
-    extern int rtos_delay_milliseconds(uint32_t ms);
+    if (g_pulse_pin != 0 && g_uptime_s >= g_pulse_off_at) {
+        HAL_PIN_SetOutputValue((int)g_pulse_pin, 0);
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: coil P%u de-energized", (unsigned)g_pulse_pin);
+        g_pulse_pin = 0;
+    }
+}
+
+/* Energize one coil pin; de-energize happens in relay_pulse_tick() next tick.
+ * If a previous pulse is still pending we de-energize it first. */
+static void relay_pulse_start(int pin)
+{
+    if (g_pulse_pin != 0) {
+        HAL_PIN_SetOutputValue((int)g_pulse_pin, 0);
+        g_pulse_pin = 0;
+    }
     HAL_PIN_SetOutputValue(pin, 1);
-    (void)rtos_delay_milliseconds(KWS_RELAY_PULSE_MS);
-    HAL_PIN_SetOutputValue(pin, 0);
+    g_pulse_pin    = (uint8_t)pin;
+    g_pulse_off_at = g_uptime_s + 1;   /* de-energize on next 1-second tick */
 }
 
 static void relay_open(void)
 {
-    relay_pulse(KWS_RELAY_PIN_OFF);
+    relay_pulse_start(KWS_RELAY_PIN_OFF);
     g_relay_closed = 0;
     PubCh(KWS_CH_RELAY, 0);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: Relay OPEN  (P%d %dms, load OFF, safe)",
-              KWS_RELAY_PIN_OFF, KWS_RELAY_PULSE_MS);
+              "KWS303WF: Relay OPEN  (P%d energized, load OFF, safe)",
+              KWS_RELAY_PIN_OFF);
 }
 
 static void relay_close(void)
 {
-    relay_pulse(KWS_RELAY_PIN_ON);
+    relay_pulse_start(KWS_RELAY_PIN_ON);
     g_relay_closed = 1;
     PubCh(KWS_CH_RELAY, 100);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: Relay CLOSE (P%d %dms, load ON)",
-              KWS_RELAY_PIN_ON, KWS_RELAY_PULSE_MS);
+              "KWS303WF: Relay CLOSE (P%d energized, load ON)",
+              KWS_RELAY_PIN_ON);
 }
 
-/* Sync physical relay to match a desired channel value */
+/* Sync physical relay to desired channel value.
+ * Guard prevents double-pulse if Ch8 is re-written with the same value. */
 static void relay_sync(int ch8_val)
 {
     int want = (ch8_val >= 100);
@@ -197,7 +224,7 @@ static float ntc_celsius(void)
 #if KWS_NTC_PULLUP
     float rntc = KWS_NTC_RS * r / (KWS_ADC_MAX - r);         /* NTC is pull-up */
 #else
-    float rntc = KWD_NTC_RS * (KWS_ADC_MAX - r) / r;         /* Rs is pull-up  */
+    float rntc = KWS_NTC_RS * (KWS_ADC_MAX - r) / r;         /* Rs is pull-up  */
 #endif
     float temp_k = 1.0f / (1.0f / KWS_NTC_T0K + logf(rntc / KWS_NTC_R25) / KWS_NTC_B);
     return temp_k - 273.15f;
@@ -246,6 +273,7 @@ static void btn_tick(void)
 typedef struct {
     uint8_t  active;
     uint8_t  vehicle;
+    uint8_t  wh_resume;     /* 1 = waiting for first valid Ch6 after power-cut resume */
     uint32_t session_id;
     float    wh_offset;
     float    wh_session;
@@ -280,15 +308,21 @@ static void sess_save(void)
 
 static bool sess_load(void)
 {
+    /* Use unsigned int temporaries for fscanf — %hhu is unreliable on
+     * newlib-nano (Beken SDK) and can write 4 bytes into a 1-byte field,
+     * corrupting adjacent struct members. */
+    unsigned int ua = 0, uv = 0;
     FILE *f = fopen(KWS_SESSION_FILE, "r");
     if (!f) return false;
     memset(&g_ev, 0, sizeof(g_ev));
-    fscanf(f, "active=%hhu\nvehicle=%hhu\nid=%u\nwh_off=%f\nwh_sess=%f\n"
+    fscanf(f, "active=%u\nvehicle=%u\nid=%u\nwh_off=%f\nwh_sess=%f\n"
               "segs=%u\npeak_w=%f\npeak_a=%f\nrate=%f\n",
-           &g_ev.active, &g_ev.vehicle, &g_ev.session_id,
+           &ua, &uv, &g_ev.session_id,
            &g_ev.wh_offset, &g_ev.wh_session, &g_ev.seg_count,
            &g_ev.peak_w, &g_ev.peak_a, &g_ev.rate_rs);
     fclose(f);
+    g_ev.active  = (uint8_t)ua;
+    g_ev.vehicle = (uint8_t)uv;
     return (bool)g_ev.active;
 }
 
@@ -368,6 +402,14 @@ static void sess_tick(void)
     float wh = (float)ReadCh(KWS_CH_ENERGY)  / 10.0f;
 
     if (g_ev.active) {
+        /* On power-cut resume, Ch6 was 0 at Init time.
+         * Wait here until HT7017 posts the first real reading, then anchor. */
+        if (g_ev.wh_resume && wh > 0.0f) {
+            g_ev.wh_offset = wh;
+            g_ev.wh_resume = 0;
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "KWS303WF: resume offset anchored at %.4f Wh", wh);
+        }
         g_ev.wh_session = wh - g_ev.wh_offset;
         if (g_ev.wh_session < 0.0f) g_ev.wh_session = 0.0f;
         if (w > g_ev.peak_w) g_ev.peak_w = w;
@@ -413,8 +455,14 @@ static void on_toggle(void)
 
 static void on_session(void)
 {
+    /* [+] button: if a session is active, end it then start a fresh one
+     * with the same vehicle type.  If no session is active, start a new
+     * 2W session (default).  This mirrors the expected "reset session" UX. */
+    uint8_t veh = g_ev.active ? g_ev.vehicle : KWS_VEH_2W;
     if (g_ev.active) sess_end();
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: Session reset by button");
+    sess_start(veh);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: Session reset/started by [+] button");
 }
 
 static void on_reserved(void)
@@ -512,13 +560,17 @@ void KWS303WF_Init(void)
     btn_register(KWS_BTN_SESSION,  on_session);
     btn_register(KWS_BTN_RESERVED, on_reserved);
 
-    /* Session: resume if power cut during active charge */
+    /* Session: resume if power cut during active charge.
+     * IMPORTANT: do NOT read Ch6 (energy) here — HT7017 has not polled yet
+     * so CHANNEL_Get(6) returns 0 at this point.  Instead set a flag so
+     * sess_tick() anchors wh_offset on the first tick when Ch6 > 0. */
     if (sess_load() && g_ev.active) {
         g_ev.seg_count++;
-        g_ev.wh_offset = (float)ReadCh(KWS_CH_ENERGY) / 10.0f;
+        g_ev.wh_offset = 0.0f;          /* will be set by sess_tick() */
+        g_ev.wh_resume = 1;             /* flag: waiting for first valid Ch6 */
         g_ad = AD_CHARGING;
-        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-                  "KWS303WF: Session RESUMED id=%u segs=%u",
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: Session RESUMED id=%u segs=%u (offset deferred)",
                   g_ev.session_id, g_ev.seg_count);
     } else {
         memset(&g_ev, 0, sizeof(g_ev));
@@ -547,6 +599,9 @@ void KWS303WF_Init(void)
 void KWS303WF_RunEverySecond(void)
 {
     g_uptime_s++;
+
+    /* De-energize coil if pulse window has expired (non-blocking relay) */
+    relay_pulse_tick();
 
     /* React to Ch8 written externally by autoexec AddChangeHandler */
     relay_sync(ReadCh(KWS_CH_RELAY));
