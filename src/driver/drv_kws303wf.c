@@ -96,8 +96,8 @@
 #define KWS_SPLIT_W         4500.0f   /* below=2W(Rizta), above=4W(Nexon)    */
 
 /* Relay hardware */
-#define KWS_RELAY_PIN_ON      7       /* P7 = ON coil  — closes contact       */
-#define KWS_RELAY_PIN_OFF     8       /* P8 = OFF coil — opens contact (safe) */
+#define KWS_RELAY_PIN_ON      8       /* P7 = ON coil  — closes contact       */
+#define KWS_RELAY_PIN_OFF     7       /* P8 = OFF coil — opens contact (safe) */
 #define KWS_RELAY_PULSE_MS  200       /* coil energise duration ms            */
 
 /* Buttons */
