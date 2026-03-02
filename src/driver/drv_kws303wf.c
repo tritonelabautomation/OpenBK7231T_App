@@ -58,7 +58,9 @@
 
 #include "../logging/logging.h"
 #include "../new_cfg.h"
+#include "../new_common.h"
 #include "../new_pins.h"
+#include "../hal/hal_pins.h"
 #include "../cmnds/cmd_public.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -153,6 +155,11 @@ static int ReadCh(int ch)
  *   This removes the 200 ms rtos_delay_milliseconds() blocking call that
  *   was previously stalling the OBK main task on every relay transition.
  * ============================================================================ */
+
+/* g_uptime_s declared here (before first use in relay_pulse_tick) and also
+ * used in Section F/I for session save interval and status reporting. */
+static uint32_t  g_uptime_s   = 0;
+
 static uint8_t  g_relay_closed = 0;
 static uint8_t  g_pulse_pin    = 0;    /* 0 = no pulse active */
 static uint32_t g_pulse_off_at = 0;    /* g_uptime_s value when to de-energize */
@@ -213,8 +220,6 @@ static void relay_sync(int ch8_val)
 /* ============================================================================
  * SECTION D — NTC TEMPERATURE
  * ============================================================================ */
-extern uint32_t HAL_ADC_Read(uint8_t channel);
-
 static float ntc_celsius(void)
 {
     uint32_t raw = HAL_ADC_Read(KWS_ADC_CH);
@@ -251,7 +256,6 @@ static void btn_register(int pin, void (*cb)(void))
 
 static void btn_tick(void)
 {
-    extern int HAL_PIN_ReadDigitalInput(int pin);
     uint8_t i;
     for (i = 0; i < g_btn_n; i++) {
         Btn_t  *b  = &g_btns[i];
@@ -285,7 +289,6 @@ typedef struct {
 
 static EvSess_t  g_ev;
 static float     g_rate_rs   = KWS_EV_RATE_DEFAULT;
-static uint32_t  g_uptime_s  = 0;
 static bool      g_auto_en   = true;
 
 typedef enum { AD_IDLE, AD_DETECTING, AD_CHARGING } AdState_t;
