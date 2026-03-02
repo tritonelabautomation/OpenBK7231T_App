@@ -536,14 +536,18 @@ static driver_t g_drivers[] = {
 	false, 
     },
 #endif
-#if ENABLE_DRIVER_KWS303WF 
-	{"KWS303WF",                  
-    KWS303WF_Init,               
-    KWS303WF_RunEverySecond,    
-    NULL,                       
-    NULL,                       
-     },                              
- #endif                             
+#if ENABLE_DRIVER_KWS303WF
+	{ "KWS303WF",                            // Driver Name
+	KWS303WF_Init,                           // Init
+	KWS303WF_RunEverySecond,                 // onEverySecond
+	NULL,                                    // appendInformationToHTTPIndexPage
+	NULL,                                    // runQuickTick
+	NULL,                                    // stopFunction
+	NULL,                                    // onChannelChanged
+	NULL,                                    // onHassDiscovery
+	false,                                   // loaded
+	},
+#endif                             
 #if ENABLE_DRIVER_PWM_GROUP
 	//drvdetail:{"name":"PWMG",
 	//drvdetail:"title":"TODO",
