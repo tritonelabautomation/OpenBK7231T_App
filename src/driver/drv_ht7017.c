@@ -474,22 +474,4 @@ void HT7017_RunEverySecond(void)
     }
 }
 
-void HT7017_AppendInformationToHTTPIndexPage(http_request_t *request)
-{
-    char tmp[480];
-    snprintf(tmp,sizeof(tmp),
-        "<h5>HT7017 Energy Meter</h5>"
-        "<table border='1' cellpadding='4' style='border-collapse:collapse'>"
-        "<tr><td>V / I / Hz</td><td><b>%.2f V / %.3f A / %.2f Hz</b></td></tr>"
-        "<tr><td>Power / PF</td><td><b>%.2f W / %.4f</b></td></tr>"
-        "<tr><td>Energy</td><td><b>%.4f Wh</b></td></tr>"
-        "<tr><td>Ch%u Alarm</td><td><b style='color:%s'>%u</b></td></tr>"
-        "<tr><td>Frames</td><td>good=%u bad=%u miss=%u</td></tr>"
-        "</table>",
-        g_voltage,g_current,g_freq,g_power,g_pf,g_wh,
-        HT_CH_ALARM,g_alarm?"#c00":"#0a0",g_alarm,
-        g_goodFr,g_badFr,g_miss);
-    strncat(request->reply,tmp,sizeof(request->reply)-strlen(request->reply)-1);
-}
-
 #endif /* ENABLE_DRIVER_HT7017 */
