@@ -126,8 +126,8 @@ static void TFT_WriteData8(uint8_t d)
 /* ══════════════════════════════════════════════════════════════════════════════
  * SECTION D — DELAY
  * ══════════════════════════════════════════════════════════════════════════════ */
-/* BUG-4 FIX: extern at file scope. Declaring extern inside a function is
- * non-portable and misleads static analysis tools. */
+/* AUDIT: extern at file scope — rtos_delay_milliseconds is only called
+ * from ST7735_Init() (once, at boot), never from RunEverySecond(). */
 extern int rtos_delay_milliseconds(uint32_t num_ms);
 
 static void ST7735_Delay(uint32_t ms)
@@ -384,7 +384,7 @@ static void draw_static_labels(void)
     ST7735_DrawChar((uint8_t)LBL_X, wy, 'W', ST7735_YELLOW, ST7735_BLACK, S2);
 }
 
-/* BUG-5 FIX: extern at file scope, not inside function body. */
+/* AUDIT: extern at file scope, not inside function body. */
 extern int CHANNEL_Get(int ch);
 
 /* Read OBK channels, decode, draw changed cells */
