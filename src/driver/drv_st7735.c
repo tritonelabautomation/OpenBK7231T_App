@@ -397,7 +397,7 @@ static void display_tick(void)
     float w   = (float)CHANNEL_Get(DISP_CH_POWER)   / 10.0f;
     float hz  = (float)CHANNEL_Get(DISP_CH_FREQ)    / 100.0f;
     float pf  = (float)CHANNEL_Get(DISP_CH_PF)      / 1000.0f;
-    float kwh = (float)CHANNEL_Get(DISP_CH_ENERGY)  / 10000.0f; /* Wh×10 → kWh */
+    float kwh = (float)CHANNEL_Get(DISP_CH_ENERGY)  / 1000.0f; /* Wh×10 → kWh */
     float tc  = (float)CHANNEL_Get(DISP_CH_TEMP)    / 100.0f;
     float cost= (float)CHANNEL_Get(DISP_CH_EVCOST)  / 100.0f;
     int   rly = CHANNEL_Get(DISP_CH_RELAY);   /* 0=open, 100=closed */
