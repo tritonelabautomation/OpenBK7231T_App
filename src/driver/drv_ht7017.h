@@ -237,7 +237,6 @@
 void     HT7017_Init(void);
 void     HT7017_RunQuick(void);
 void     HT7017_RunEverySecond(void);
-void     HT7017_AppendInformationToHTTPIndexPage(http_request_t *request);
 
 float    HT7017_GetVoltage(void);
 float    HT7017_GetCurrent(void);
