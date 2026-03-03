@@ -126,9 +126,12 @@ static void TFT_WriteData8(uint8_t d)
 /* ══════════════════════════════════════════════════════════════════════════════
  * SECTION D — DELAY
  * ══════════════════════════════════════════════════════════════════════════════ */
+/* BUG-4 FIX: extern at file scope. Declaring extern inside a function is
+ * non-portable and misleads static analysis tools. */
+extern int rtos_delay_milliseconds(uint32_t num_ms);
+
 static void ST7735_Delay(uint32_t ms)
 {
-    extern int rtos_delay_milliseconds(uint32_t num_ms);
     (void)rtos_delay_milliseconds(ms);
 }
 
@@ -381,13 +384,13 @@ static void draw_static_labels(void)
     ST7735_DrawChar((uint8_t)LBL_X, wy, 'W', ST7735_YELLOW, ST7735_BLACK, S2);
 }
 
+/* BUG-5 FIX: extern at file scope, not inside function body. */
+extern int CHANNEL_Get(int ch);
+
 /* Read OBK channels, decode, draw changed cells */
 static void display_tick(void)
 {
-    extern int CHANNEL_Get(int ch);   /* OBK channel read */
-
     char buf[16];
-
     /* Decode channel values back to physical floats */
     float v   = (float)CHANNEL_Get(DISP_CH_VOLTAGE) / 100.0f;
     float a   = (float)CHANNEL_Get(DISP_CH_CURRENT) / 1000.0f;
