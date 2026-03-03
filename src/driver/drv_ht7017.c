@@ -17,8 +17,8 @@
  *        and writes Ch8. drv_kws303wf.c owns P7/P8 GPIO exclusively.
  *
  * HARDWARE: BK7231N, HT7017 SSOP-16, UART 4800 8E1
- *   Request:  0xA5 <reg>
- *   Response: D2 D1 D0 CS  (CS = ~(0xA5+reg+D2+D1+D0))
+ *   Request:  0x6A <reg>
+ *   Response: D2 D1 D0 CS  (CS = ~(0x6A+reg+D2+D1+D0))
  *
  * CALIBRATION: VoltageSet → CurrentSet → PowerSet (in order)
  *   Use 1kW resistive load. Saved to /ht7017cal.cfg.
