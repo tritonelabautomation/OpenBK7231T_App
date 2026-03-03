@@ -138,7 +138,7 @@ static void PubCh(int ch, int val)
     CMD_ExecuteCommand(buf, 0);
 }
 
-/* BUG-1 FIX: extern at file scope, not inside function body.
+/* BUG-1 FIX (AUDIT): extern at file scope, not inside function body.
  * Declaring extern inside a function is legal C but non-portable and
  * violates the OBK coding standard; some compilers emit a warning. */
 extern int CHANNEL_Get(int ch);
@@ -265,8 +265,10 @@ static void btn_tick(void)
         Btn_t  *b  = &g_btns[i];
         uint8_t lv = (uint8_t)HAL_PIN_ReadDigitalInput(b->pin);
         if (lv == b->last) { b->dbc = 0; continue; }
-        if (++b->dbc < 3)  continue;   /* BUG-2 FIX: was < 1 (always false = zero debounce).
-                                         * Require 3 consecutive differing reads ≈ 3 s at 1 Hz poll. */
+        if (++b->dbc < 3)  continue;   /* Require 3 consecutive differing reads ≈ 3 s at 1 Hz.
+                                         * After pre-increment: on first differing read dbc=1,
+                                         * 1 < 3 → continue (no fire).  On third dbc=3,
+                                         * 3 < 3 is false → falls through to fire. */
         b->dbc = 0; b->last = lv;
         if (lv == 0 && b->cb) b->cb();
     }
@@ -352,15 +354,17 @@ static void sess_start(uint8_t veh)
               (veh==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME);
 }
 
-/* BUG-3 FIX: CMD_ExecuteCommand("publishMQTT ...") called from RunEverySecond
+/* AUDIT: CMD_ExecuteCommand("publishMQTT ...") called directly from RunEverySecond
  * blocks the LWIP TCP stack for 4-20 s when the broker is unreachable, killing
- * the BK7231N watchdog (fires at ~5 s).  Fix: set a flag here; a separate
- * RunEverySecond slot fires the publish on the NEXT tick so the OS scheduler
- * can feed the WDT in between.  In practice OBK's MQTT layer is already
- * non-blocking when the broker is up; the flag simply avoids the synchronous
- * connect-timeout path when it is down. */
-static char   g_mqtt_pending_pl[320] = {0};
-static uint8_t g_mqtt_pending        = 0;
+ * the BK7231N watchdog (fires at ~5 s).  Fix: set a flag here; RunEverySecond()
+ * fires the publish on the NEXT tick so the OS scheduler can feed the WDT first.
+ * In practice OBK's MQTT layer is already non-blocking when the broker is up;
+ * the flag avoids the synchronous connect-timeout path when the broker is down. */
+static char            g_mqtt_pending_pl[320] = {0};
+static volatile uint8_t g_mqtt_pending         = 0;  /* volatile: read in RunEverySecond,
+                                                        written in sess_mqtt(); prevents
+                                                        compiler reordering clear before
+                                                        the snprintf that consumes it */
 
 static void sess_mqtt(void)
 {
@@ -616,13 +620,15 @@ void KWS303WF_RunEverySecond(void)
 {
     g_uptime_s++;
 
-    /* BUG-3 FIX: deferred MQTT publish — execute here, one tick after
-     * sess_end() set the flag, so the scheduler feeds the WDT first. */
+    /* Deferred MQTT publish — flag was set by sess_end() last tick.
+     * IMPORTANT: consume payload into local cmd[] BEFORE clearing the flag
+     * so a hypothetical re-entrant sess_end() cannot clobber g_mqtt_pending_pl
+     * while we are formatting cmd[].  Clear the flag last. */
     if (g_mqtt_pending) {
         char cmd[400];
-        g_mqtt_pending = 0;
         snprintf(cmd, sizeof(cmd), "publishMQTT %s %s",
                  KWS_MQTT_TOPIC, g_mqtt_pending_pl);
+        g_mqtt_pending = 0;   /* clear AFTER payload copied to local buf */
         CMD_ExecuteCommand(cmd, 0);
     }
 
