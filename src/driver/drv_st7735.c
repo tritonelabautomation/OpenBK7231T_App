@@ -41,14 +41,16 @@
  *   DrawChar() intercepts RUPEE_CHAR before the ASCII range guard.
  *   snprintf format: "\x01%5.2f" → ₹ symbol rendered as one glyph.
  *
- *   Glyph {0x7F,0x05,0x0D,0x15,0x21} verified pixel map:
- *     # # # # #    row 0  top bar  (full width)
- *     # . . . .    row 1  left stem only
- *     # # # # .    row 2  second bar  ← ₹ signature (4-wide)
- *     # . # . .    row 3  diagonal hint
- *     # . . # .    row 4  diagonal
- *     # . . . #    row 5  diagonal foot
- *     # . . . .    row 6  left anchor
+ *   Glyph {0x7F,0x50,0x58,0x54,0x62} verified pixel map:
+ *     # # # # #    row 0  data bottom → screen TOP bar  (full width)
+ *     # . . . #    row 1  data         → screen left stem + right
+ *     # # # # .    row 2  data         → screen second bar (4-wide)
+ *     # . # . .    row 3  data         → screen diagonal pivot
+ *     # . . # .    row 4  data         → screen diagonal
+ *     # . . . #    row 5  data         → screen diagonal foot
+ *     # . . . .    row 6  data top     → screen BOTTOM anchor
+ *   NOTE: glyph is stored vertically mirrored because display
+ *   MADCTL has Y-axis inverted (row0 = screen bottom on this hardware)
  *
  *   Cost delta vs "Rs" prefix:
  *     Flash  : +13 bytes (+5 glyph, +8 DrawChar branch)
@@ -277,13 +279,14 @@ void ST7735_FillScreen(uint16_t colour)
  *     col:   0     1     2     3     4
  *           0x7A  0x05  0x0D  0x15  0x22
  *
- *     # # # # #    row 0  — top bar (full width)
- *     # . . . .    row 1  — left stem only
- *     # # # # .    row 2  — second bar (4-wide, ₹ double-bar signature)
- *     # . # . .    row 3  — stem + diagonal hint
- *     # . . # .    row 4  — diagonal continues
- *     # . . . #    row 5  — diagonal foot
- *     # . . . .    row 6  — left anchor
+ *     # # # # #    row 0 (data) → renders at screen BOTTOM (Y-flipped display)
+ *     # . . . #    row 1 → diag foot
+ *     # . . # .    row 2 → diagonal
+ *     # . # . .    row 3 → pivot
+ *     # # # # .    row 4 → second bar
+ *     # . . . #    row 5 → left stem + right (R-top style)
+ *     # # # # #    row 6 (data) → renders at screen TOP as full bar
+ *   Glyph is vertically mirrored: display Y-axis is inverted on this hardware.
  *
  *   Addressed via RUPEE_CHAR = '\x01' sentinel in DrawChar().
  *   Flash cost of this extra row: +5 bytes.
@@ -384,7 +387,7 @@ static const uint8_t g_font5x7[][5] = {
     /* 0x7C '|'  */ {0x00,0x00,0x7F,0x00,0x00},
     /* 0x7D '}'  */ {0x00,0x41,0x36,0x08,0x00},
     /* 0x7E '~'  */ {0x10,0x08,0x08,0x10,0x08},
-    /* idx 95  ₹ */ {0x7F,0x05,0x0D,0x15,0x21},
+    /* idx 95  ₹ */ {0x7F,0x50,0x58,0x54,0x62},
 };
 
 /* ── DrawChar — handles standard ASCII and RUPEE_CHAR sentinel ───────────
