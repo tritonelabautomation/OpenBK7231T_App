@@ -126,6 +126,10 @@
 #define DISP_CH_TEMP      9
 #define DISP_CH_EVCOST   10
 #define DISP_CH_WIFI     11
+#define DISP_CH_SESS_ACTIVE  12   /* improvement #1/#10: 1=session charging   */
+#define DISP_CH_SESS_ELAPSED 13   /* improvement #1: elapsed seconds from kws */
+#define DISP_CH_SESS_ACT 12   /* 0=idle 1=active — written by drv_kws303wf */
+#define DISP_CH_SESS_ELP 13   /* session elapsed seconds — written by drv_kws303wf */
 
 /* Rupee sentinel: ASCII SOH (0x01), never used by OBK console or MQTT.
  * Intercepted in DrawChar() → mapped to custom ₹ glyph at font index 95. */
@@ -555,6 +559,9 @@ static char p_kwh[14];
 static char p_pf[10], p_hz[10];
 static char p_tc[10], p_tmr[8];
 static char p_rly[4], p_wif[6], p_alm[4];
+static char p_sess_tmr[10];   /* improvement #1: session elapsed H:MM:SS     */
+static char p_w_lbl[4];       /* improvement #5: 'W' or 'kW' unit label      */
+/* NOTE: p_rly now carries "OFF"/"ON "/"CHG" — no separate p_sess needed   */
 
 static void zone_update(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
                         const char *str, uint16_t fg, uint8_t sc,
@@ -572,26 +579,28 @@ static void draw_static_labels(void)
 {
     uint8_t vy = (uint8_t)(ROW_V_Y    + (ROW_V_H    - FONT_H * S2) / 2);
     uint8_t ay = (uint8_t)(ROW_A_Y    + (ROW_A_H    - FONT_H * S2) / 2);
-    uint8_t wy = (uint8_t)(ROW_W_Y    + (ROW_W_H    - FONT_H * S2) / 2);
     ST7735_DrawChar((uint8_t)LBL_X, vy, 'V', ST7735_RED,    ST7735_BLACK, S2);
     ST7735_DrawChar((uint8_t)LBL_X, ay, 'A', ST7735_CYAN,   ST7735_BLACK, S2);
-    ST7735_DrawChar((uint8_t)LBL_X, wy, 'W', ST7735_YELLOW, ST7735_BLACK, S2);
+    /* NOTE: power row label ('W' or 'kW') is drawn dynamically in
+     * display_tick() improvement #5 — NOT a static label.            */
 }
 
 static void caches_clear(void)
 {
-    memset(p_v,   '\0', sizeof(p_v));
-    memset(p_a,   '\0', sizeof(p_a));
-    memset(p_w,   '\0', sizeof(p_w));
-    memset(p_cost,'\0', sizeof(p_cost));
-    memset(p_kwh, '\0', sizeof(p_kwh));
-    memset(p_pf,  '\0', sizeof(p_pf));
-    memset(p_hz,  '\0', sizeof(p_hz));
-    memset(p_tc,  '\0', sizeof(p_tc));
-    memset(p_tmr, '\0', sizeof(p_tmr));
-    memset(p_rly, '\0', sizeof(p_rly));
-    memset(p_wif, '\0', sizeof(p_wif));
-    memset(p_alm, '\0', sizeof(p_alm));
+    memset(p_v,        '\0', sizeof(p_v));
+    memset(p_a,        '\0', sizeof(p_a));
+    memset(p_w,        '\0', sizeof(p_w));
+    memset(p_cost,     '\0', sizeof(p_cost));
+    memset(p_kwh,      '\0', sizeof(p_kwh));
+    memset(p_pf,       '\0', sizeof(p_pf));
+    memset(p_hz,       '\0', sizeof(p_hz));
+    memset(p_tc,       '\0', sizeof(p_tc));
+    memset(p_tmr,      '\0', sizeof(p_tmr));
+    memset(p_rly,      '\0', sizeof(p_rly));
+    memset(p_wif,      '\0', sizeof(p_wif));
+    memset(p_alm,      '\0', sizeof(p_alm));
+    memset(p_sess_tmr, '\0', sizeof(p_sess_tmr));  /* improvement #1 */
+    memset(p_w_lbl,    '\0', sizeof(p_w_lbl));     /* improvement #5 */
 }
 
 extern int CHANNEL_Get(int ch);
@@ -610,17 +619,27 @@ static void display_tick(void)
     float cost = (float)CHANNEL_Get(DISP_CH_EVCOST)  / 100.0f;
     int   rly  = CHANNEL_Get(DISP_CH_RELAY);
     int   wif  = CHANNEL_Get(DISP_CH_WIFI);
-    int   alm_raw = CHANNEL_Get(DISP_CH_ALARM);
+    int   alm_raw    = CHANNEL_Get(DISP_CH_ALARM);
+    int   sess_active = CHANNEL_Get(DISP_CH_SESS_ACTIVE);   /* improvement #10 */
+    int   sess_elapsed = CHANNEL_Get(DISP_CH_SESS_ELAPSED); /* improvement #1  */
 
     int alm = (alm_raw >= 0 && alm_raw <= 4) ? alm_raw : 0;
 
-    static uint32_t s_sec = 0;
-    s_sec++;
-
-    /* STATUS BAR — relay */
+    /* improvement #10 — STATUS BAR: relay indicator uses colour to show
+     * session state:
+     *   OFF     = grey  "OFF"  relay open
+     *   ON      = green "ON " relay closed, no session tracking
+     *   CHRG    = cyan  "CHG" relay closed AND session active
+     * This gives instant visual confirmation that auto-detect fired.    */
     {
-        const char *rs = (rly >= 100) ? "ON " : "OFF";
-        uint16_t    rc = (rly >= 100) ? ST7735_GREEN : ST7735_GREY;
+        const char *rs;
+        uint16_t    rc;
+        if (rly >= 100) {
+            if (sess_active) { rs = "CHG"; rc = ST7735_CYAN;  }
+            else             { rs = "ON "; rc = ST7735_GREEN; }
+        } else {
+            rs = "OFF"; rc = ST7735_GREY;
+        }
         if (strncmp(rs, p_rly, sizeof(p_rly)) != 0) {
             strncpy(p_rly, rs, sizeof(p_rly) - 1);
             ST7735_FillRect(STA_RLY_X, ROW_STA_Y, STA_RLY_W, ROW_STA_H, ST7735_BLACK);
@@ -654,9 +673,25 @@ static void display_tick(void)
     zone_update(0, ROW_A_Y, VAL_W, ROW_A_H, buf,
                 ST7735_CYAN, S2, p_a, sizeof(p_a));
 
-    snprintf(buf, sizeof(buf), "%5.1f", w);
-    zone_update(0, ROW_W_Y, VAL_W, ROW_W_H, buf,
-                ST7735_YELLOW, S2, p_w, sizeof(p_w));
+    /* improvement #5 — power row: show kW (2dp) when session active for
+     * charge-rate readability; show W (1dp) when idle for fault monitoring.
+     * The static label 'W' at LBL_X is redrawn only on state change.      */
+    {
+        const char *w_lbl = sess_active ? "kW" : "W ";
+        if (strncmp(w_lbl, p_w_lbl, sizeof(p_w_lbl)) != 0) {
+            strncpy(p_w_lbl, w_lbl, sizeof(p_w_lbl) - 1);
+            uint8_t wy = (uint8_t)(ROW_W_Y + (ROW_W_H - FONT_H * S2) / 2);
+            ST7735_FillRect((uint8_t)LBL_X, wy, (uint8_t)LBL_W, FONT_H * S2, ST7735_BLACK);
+            ST7735_DrawString((uint8_t)LBL_X, wy, w_lbl, ST7735_YELLOW, ST7735_BLACK, S2);
+            memset(p_w, '\0', sizeof(p_w));  /* force value redraw with new unit */
+        }
+        if (sess_active)
+            snprintf(buf, sizeof(buf), "%5.2f", w / 1000.0f);
+        else
+            snprintf(buf, sizeof(buf), "%5.1f", w);
+        zone_update(0, ROW_W_Y, VAL_W, ROW_W_H, buf,
+                    ST7735_YELLOW, S2, p_w, sizeof(p_w));
+    }
 
     /* EV COST — '\x01' sentinel → ₹ glyph via DrawChar().
      * "%5.2f" produces max 7 chars (e.g. "999.99") → with sentinel = 8 chars.
@@ -683,12 +718,27 @@ static void display_tick(void)
     zone_update(TC_X, ROW_TTY, TC_W, ROW_TTH, buf,
                 ST7735_ORANGE, S1, p_tc, sizeof(p_tc));
 
+    /* improvement #1 — timer row right half:
+     * Show real session elapsed time (H:MM:SS) from Ch13 when a session is
+     * active; show "--:--" when idle so the user knows no session is running.
+     * The old s_sec (display-uptime counter) is removed entirely.          */
     {
-        uint32_t mm = (s_sec / 60) % 100;
-        uint32_t ss =  s_sec % 60;
-        snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)mm, (unsigned)ss);
+        if (sess_active && sess_elapsed >= 0) {
+            uint32_t el = (uint32_t)sess_elapsed;
+            uint32_t hh =  el / 3600u;
+            uint32_t mm = (el % 3600u) / 60u;
+            uint32_t ss =  el % 60u;
+            if (hh > 0)
+                snprintf(buf, sizeof(buf), "%u:%02u:%02u", (unsigned)hh,
+                         (unsigned)mm, (unsigned)ss);
+            else
+                snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)mm, (unsigned)ss);
+        } else {
+            snprintf(buf, sizeof(buf), "--:--");
+        }
         zone_update(TM_X, ROW_TTY, TM_W, ROW_TTH, buf,
-                    ST7735_WHITE, S1, p_tmr, sizeof(p_tmr));
+                    sess_active ? ST7735_CYAN : ST7735_GREY,
+                    S1, p_sess_tmr, sizeof(p_sess_tmr));
     }
 }
 
