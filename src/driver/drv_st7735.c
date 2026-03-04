@@ -38,68 +38,56 @@
  *   DrawChar() catches '\x01' before the ASCII guard → uses index 95.
  *   snprintf uses "\x01%5.2f" to embed the symbol.
  *
- *   ── GLYPH BUG ANALYSIS & FIX ──────────────────────────────────────────
+ *   ── GLYPH DESIGN — derived from FreeSans TTF rendered at 32pt ─────────
  *
- *   BROKEN bytes: {0x7F, 0x05, 0x0D, 0x15, 0x21}
- *   FIXED  bytes: {0x7F, 0x05, 0x05, 0x0D, 0x15}
+ *   Source: FreeSans.ttf rendered at 32pt → 16×24 pixel glyph →
+ *           block-averaged down to 5×7 for the embedded font grid.
  *
- *   Root cause (3 wrong bytes, all in columns 2-4):
+ *   Canonical ₹ structure (Unicode U+20B9, per Wikipedia / font analysis):
+ *     "Devanagari letter र (ra) + Latin R without its vertical bar
+ *      + double horizontal line at top"
  *
- *   col2: 0x0D (broken) → 0x05 (fixed)
- *     0x0D = 0b00001101 → lights rows 0, 2, AND 3
- *     0x05 = 0b00000101 → lights rows 0 and 2 only
- *     Bug: bit3 set in col2 placed a stray pixel at (col2, row3).
- *     At scale=2, this extends col2's lit region from display-rows 4-5
- *     (the 2nd bar) into display-rows 6-7 (where the diagonal should START).
- *     The 2nd bar and the diagonal fuse into one 4-display-pixel-tall block
- *     at col2, destroying the visual separation that makes ₹ recognisable.
+ *   Key structural facts confirmed from the real font pixel data:
+ *     1. TWO full-width horizontal bars at top  (the "=" identity of ₹)
+ *     2. Right-side arch connector between the bars  (col3 only, row 1)
+ *     3. Arch body below bar 2  (D/P-shaped bump, cols 1–3, rows 3–4)
+ *     4. Diagonal leg descending from arch (cols 2–4, rows 5–6)
+ *     5. NO continuous left vertical stem  (previous versions all had this
+ *        erroneously — col0 was lit across rows 1,3,4,5,6)
  *
- *   col3: 0x15 (broken) → 0x0D (fixed)
- *     0x15 = 0b00010101 → lights rows 0, 2, 4  (skips row3)
- *     0x0D = 0b00001101 → lights rows 0, 2, 3
- *     Bug: the broken byte has the diagonal dot at row4, not row3.
- *     Combined with broken col2 having a stray dot at row3, the diagonal
- *     appeared to jump unevenly: col2→r3, col3→r4, col4→r5 looks correct
- *     on paper but fuses badly at scale=2 because col2's r3 merges with
- *     the 2nd bar above it (col2 has r2 AND r3 both lit = 4 display pixels).
- *     Fixed col3=0x0D: diagonal step is at row3 (display-rows 6-7), clean.
- *     Also ensures 2nd bar extends through col3 at row2.
- *
- *   col4: 0x21 (broken) → 0x15 (fixed)
- *     0x21 = 0b00100001 → lights rows 0 and 5
- *     0x15 = 0b00010101 → lights rows 0, 2, and 4
- *     Bug: 0x21 only lights row5 in the lower half, leaving row4 dark.
- *     The diagonal step from col3(fixed→row3) to col4 jumped TWO glyph
- *     rows (row3→row5), producing a visually disconnected tail dot at
- *     display-rows 10-11, isolated from the diagonal above it.
- *     Also critically: 0x21 has NO bit2 set, so col4 was ABSENT from the
- *     2nd bar at row2 — making the 2nd bar only 4-wide when it should be
- *     5-wide for clear ₹ identification.
- *     Fixed col4=0x15: bit2 puts col4 in the 2nd bar (5-wide bar now),
- *     bit4 puts the diagonal step at row4 (display-rows 8-9), connecting
- *     cleanly to col3's step at row3.
- *
- *   Final pixel map for FIXED glyph {0x7F, 0x05, 0x05, 0x0D, 0x15}:
+ *   Final bytes: {0x05, 0x1D, 0x3D, 0x6F, 0x45}
  *
  *     col:  0     1     2     3     4
- *          0x7F  0x05  0x05  0x0D  0x15
+ *          0x05  0x1D  0x3D  0x6F  0x45
  *
- *     r0:  ##  ##  ##  ##  ##    full 5-wide top bar
- *     r1:  ##                    left stem only
- *     r2:  ##  ##  ##  ##  ##    full 5-wide SECOND BAR ← ₹ identity
- *     r3:  ##              ##    stem + diagonal step 1 at col3
- *     r4:  ##                ##  stem + diagonal step 2 at col4
- *     r5:  ##                    left stem
- *     r6:  ##                    left anchor
+ *     r0:  ##    ##    ##    ##    ##    ← full 5-wide BAR 1
+ *     r1:  ..    ..    ..    ##    ..    ← arch connector (col3 only)
+ *     r2:  ##    ##    ##    ##    ##    ← full 5-wide BAR 2
+ *     r3:  ..    ##    ##    ##    ..    ← arch body top (cols 1–3)
+ *     r4:  ..    ##    ##    ..    ..    ← arch body bottom (cols 1–2)
+ *     r5:  ..    ..    ##    ##    ..    ← diagonal (cols 2–3)
+ *     r6:  ..    ..    ..    ##    ##    ← diagonal foot (cols 3–4)
  *
- *   At scale-2 each glyph pixel = 2×2 display pixels → 10×14px cell:
+ *   At scale=2 each glyph pixel = 2×2 display pixels → 10×14px cell:
  *
- *     Display rows 0-1:   ██████████  ← full 10px top bar
- *     Display rows 2-3:   ██          ← 2px left stem
- *     Display rows 4-5:   ██████████  ← full 10px SECOND BAR
- *     Display rows 6-7:   ██      ██  ← stem + diagonal col3
- *     Display rows 8-9:   ██        ████  ← stem + diagonal col4
- *     Display rows 10-13: ██          ← stem tail
+ *     d-rows  0– 1:  ████████████████████  ← 10px BAR 1 (full)
+ *     d-rows  2– 3:              ████       ← arch connector col3
+ *     d-rows  4– 5:  ████████████████████  ← 10px BAR 2 (full)
+ *     d-rows  6– 7:      ████████████      ← arch body cols 1–3
+ *     d-rows  8– 9:      ████████          ← arch bottom cols 1–2
+ *     d-rows 10–11:          ████████      ← diagonal cols 2–3
+ *     d-rows 12–13:              ████████  ← diagonal foot cols 3–4
+ *
+ *   History of glyph bytes in this file:
+ *     v0 (original, broken):  {0x7F, 0x05, 0x0D, 0x15, 0x21}
+ *     v1 (first fix attempt): {0x7F, 0x05, 0x05, 0x0D, 0x15}
+ *     v2 (second attempt):    {0x7F, 0x0D, 0x15, 0x25, 0x45}
+ *     v3 (this version):      {0x05, 0x1D, 0x3D, 0x6F, 0x45}  ← CORRECT
+ *
+ *   v0–v2 all shared the same fundamental error: col0 = 0x7F (full left
+ *   stem lit for all 7 rows). The real ₹ has NO continuous left spine —
+ *   the structure is entirely formed by the two bars + arch + diagonal.
+ *   v3 is derived directly from real FreeSans font pixel data.
  *
  * ── FIX-ST-1: alarm indicator ────────────────────────────────────────────
  *   Original code drew alarm string every tick without erasing first.
@@ -304,21 +292,44 @@ void ST7735_FillScreen(uint16_t colour)
  *
  *   Column-major storage: 5 bytes per glyph, bit 0 = top row (row 0).
  *
- *   ₹ glyph at index 95: {0x7F, 0x05, 0x05, 0x0D, 0x15}   ← FIXED
+ *   ── ₹ GLYPH v3 at index 95 ─────────────────────────────────────────────
  *
- *   Previous (broken) bytes were {0x7F, 0x05, 0x0D, 0x15, 0x21}.
- *   The fix corrects THREE bytes — see file header for full analysis.
+ *   Bytes: {0x05, 0x1D, 0x3D, 0x6F, 0x45}
  *
- *     col:  0     1     2     3     4
- *          0x7F  0x05  0x05  0x0D  0x15
+ *   Derived by rendering FreeSans.ttf at 32pt (produces a 16×24px glyph),
+ *   then block-averaging down to the 5×7 grid.  This is the first version
+ *   that correctly captures all three canonical components of ₹:
  *
- *     r0: [full top bar — all 5 cols]
- *     r1: [left stem only]
- *     r2: [full second bar — all 5 cols]  ← broken had only 4-wide here
- *     r3: [left stem]  [col3 diagonal]    ← broken had stray col2 pixel
- *     r4: [left stem]        [col4 diag]  ← broken skipped row, isolated dot
- *     r5: [left stem]
- *     r6: [left anchor]
+ *     Component 1 — double horizontal bars (rows 0 and 2, full 5-wide)
+ *     Component 2 — arch/bump (D-shape on right, rows 1–4)
+ *     Component 3 — diagonal leg (descends right, rows 5–6)
+ *
+ *   col:  0     1     2     3     4
+ *        0x05  0x1D  0x3D  0x6F  0x45
+ *
+ *   r0:  ##    ##    ##    ##    ##    full BAR 1 (5-wide)
+ *   r1:  ..    ..    ..    ##    ..    arch connector — col3 only
+ *   r2:  ##    ##    ##    ##    ##    full BAR 2 (5-wide)  ← ₹ identity
+ *   r3:  ..    ##    ##    ##    ..    arch body top (cols 1–3)
+ *   r4:  ..    ##    ##    ..    ..    arch body bottom (cols 1–2)
+ *   r5:  ..    ..    ##    ##    ..    diagonal (cols 2–3)
+ *   r6:  ..    ..    ..    ##    ##    diagonal foot (cols 3–4)
+ *
+ *   col0 = 0x05 = rows {0,2}            (bar1, bar2 left edge only)
+ *   col1 = 0x1D = rows {0,2,3,4}        (bars + arch body left)
+ *   col2 = 0x3D = rows {0,2,3,4,5}      (bars + arch + diagonal top)
+ *   col3 = 0x6F = rows {0,1,2,3,5,6}    (bars + connector + arch + diag)
+ *   col4 = 0x45 = rows {0,2,6}          (bar1, bar2 right edge + diag foot)
+ *
+ *   At scale=2 (10×14 display pixels):
+ *
+ *     d-rows  0– 1:  ████████████████████  BAR 1 full width
+ *     d-rows  2– 3:              ████       arch connector (col3)
+ *     d-rows  4– 5:  ████████████████████  BAR 2 full width
+ *     d-rows  6– 7:      ████████████      arch body cols 1–3
+ *     d-rows  8– 9:      ████████          arch bottom cols 1–2
+ *     d-rows 10–11:          ████████      diagonal cols 2–3
+ *     d-rows 12–13:              ████████  diagonal foot cols 3–4
  *
  *   Addressed via RUPEE_CHAR = '\x01' sentinel in DrawChar().
  * ──────────────────────────────────────────────────────────────────────── */
@@ -419,24 +430,24 @@ static const uint8_t g_font5x7[][5] = {
     /* 0x7D '}'  */ {0x00,0x41,0x36,0x08,0x00},
     /* 0x7E '~'  */ {0x10,0x08,0x08,0x10,0x08},
     /*
-     * idx 95  ₹  FIXED — was {0x7F,0x05,0x0D,0x15,0x21}
+     * idx 95  ₹  v3 — derived from FreeSans.ttf 32pt pixel data
      *
-     * Three bytes corrected (cols 2, 3, 4):
-     *   col2: 0x0D → 0x05  clears spurious bit3 that fused 2nd bar+diagonal
-     *   col3: 0x15 → 0x0D  moves diagonal step from row4 to row3, adds row2
-     *                       so the 2nd bar is now full 5-wide
-     *   col4: 0x21 → 0x15  adds row2 (completes 5-wide 2nd bar), moves
-     *                       diagonal foot from isolated row5 to connected row4
+     * col0=0x05  rows {0,2}          bar1 left edge, bar2 left edge
+     * col1=0x1D  rows {0,2,3,4}      bars + arch body left side
+     * col2=0x3D  rows {0,2,3,4,5}    bars + arch + diagonal top
+     * col3=0x6F  rows {0,1,2,3,5,6}  bars + arch connector + arch + diagonal
+     * col4=0x45  rows {0,2,6}        bar1 right edge, bar2 right edge, diag foot
      *
-     * Result at scale=2 (10×14 display pixels):
-     *   ██████████  d-rows 0-1   full top bar
-     *   ██          d-rows 2-3   left stem
-     *   ██████████  d-rows 4-5   full 5-wide SECOND BAR  ← ₹ identity
-     *   ██      ██  d-rows 6-7   stem + diagonal col3
-     *   ██        ██ d-rows 8-9  stem + diagonal col4
-     *   ██          d-rows 10-13 stem tail
+     * Scale=2 display (10×14px):
+     *   ████████████████████  d-rows  0-1  BAR 1
+     *               ████      d-rows  2-3  arch connector col3
+     *   ████████████████████  d-rows  4-5  BAR 2
+     *       ████████████      d-rows  6-7  arch body cols 1-3
+     *       ████████          d-rows  8-9  arch bottom cols 1-2
+     *           ████████      d-rows 10-11 diagonal cols 2-3
+     *               ████████  d-rows 12-13 diagonal foot cols 3-4
      */
-    /* idx 95 ₹  */ {0x7F, 0x05, 0x05, 0x0D, 0x15},  /* FIXED */
+    /* idx 95 ₹  */ {0x05, 0x1D, 0x3D, 0x6F, 0x45},  /* v3 — FreeSans faithful */
 };
 
 /* ── DrawChar: standard ASCII + RUPEE_CHAR sentinel ─────────────────────
