@@ -8,9 +8,13 @@
  * startDriver KWS303WF
  *
  * ── CHANNEL OUTPUT ────────────────────────────────────────────────────────
- *   Ch 8  = Relay state   (0=open/safe, 100=closed/on)
- *   Ch 9  = Temperature   (degrees-C x 100, e.g. 2716 = 27.16 C)
- *   Ch 10 = EV session cost (Rs x 100, e.g. 376 = Rs 3.76)
+ *   Ch 8  = Relay state      (0=open/safe, 100=closed/on)
+ *   Ch 9  = Temperature      (degrees-C x 100, e.g. 2716 = 27.16 C)
+ *   Ch 10 = EV session cost  (Rs x 100, e.g. 376 = Rs 3.76)
+ *   Ch 12 = Session active   (0=idle, 1=active) — read by drv_st7735 for
+ *                             status bar colour and timer source selection
+ *   Ch 13 = Session elapsed  (seconds since sess_start, resets at sess_end)
+ *                             — display shows H:MM:SS; MQTT uses duration_s
  *
  * ── CHANNEL INPUT ─────────────────────────────────────────────────────────
  *   Ch 3  = Power  (W x 10)     from drv_ht7017
@@ -52,6 +56,18 @@
  *   startDriver KWS303WF
  *   AddChangeHandler Channel7 != 0 kws_ch8_set 0
  *   AddChangeHandler Channel7 == 0 kws_ch8_set 100
+ *
+ * ── New channels (set in autoexec.bat) ────────────────────────────────────
+ *   setChannelType 12 ReadOnly   (session active flag)
+ *   setChannelType 13 ReadOnly   (session elapsed seconds)
+ *
+ * ── New console commands ───────────────────────────────────────────────────
+ *   kws_detect_w [W]        — get/set auto-detect power threshold (default 500W)
+ *   kws_history_dump        — print session history CSV to UART log
+ *   kws_history_clear       — truncate /kws_history.csv
+ *   kws_lifetime [Wh]       — get/set lifetime energy odometer
+ *   kws_session_stat        — now shows elapsed time, detect_w, lifetime
+ *   [-] button (P20)        — cycles vehicle profile (2W↔4W) at any time
  */
 
 #include "../obk_config.h"
@@ -85,7 +101,7 @@
 #define KWS_VEH4_KM_PER_KWH   7.8f
 #define KWS_VEH4_OLD_KMPL     12.0f
 #define KWS_PETROL_RS_PER_L  107.0f
-#define KWS_DETECT_W_MIN     500.0f
+#define KWS_DETECT_W_MIN_DEFAULT 500.0f  /* runtime-adjustable via kws_detect_w */
 #define KWS_DETECT_S          30
 #define KWS_END_S             60
 #define KWS_SPLIT_W         4500.0f
@@ -152,8 +168,13 @@
 #define KWS_CH_POWER          3
 #define KWS_CH_CURRENT        2
 #define KWS_CH_ENERGY         6
+#define KWS_CH_WIFI          11   /* OBK core — read-only here for MQTT guard */
+#define KWS_CH_SESS_ACTIVE   12   /* 0=idle 1=active — read by display        */
+#define KWS_CH_SESS_ELAPSED  13   /* seconds since sess_start — display timer  */
 
 #define KWS_SESSION_FILE     "/kws_session.cfg"
+#define KWS_HISTORY_FILE     "/kws_history.csv"   /* append-only session log   */
+#define KWS_LIFETIME_FILE    "/kws_lifetime.cfg"  /* persists cumulative Wh    */
 #define KWS_MQTT_TOPIC       "home/ev/session"
 
 /* ============================================================================
@@ -169,6 +190,37 @@ static void PubCh(int ch, int val)
 extern int CHANNEL_Get(int ch);   /* file-scope extern — audit verified */
 
 static int ReadCh(int ch) { return CHANNEL_Get(ch); }
+
+/* ── Improvement #6: runtime-adjustable auto-detect threshold ─────────── */
+static float g_detect_w_min = KWS_DETECT_W_MIN_DEFAULT;
+
+/* ── Improvement #8: lifetime energy accumulator ──────────────────────── *
+ * Loaded from KWS_LIFETIME_FILE at init.  Updated every 60 s while        *
+ * a session is active, and on every sess_end().                            *
+ * Unit: Wh (float). Persists across reflashes as long as JFFS2 is intact. */
+static float    g_lifetime_wh     = 0.0f;
+static uint8_t  g_lifetime_dirty  = 0u;   /* 1 = needs write to flash     */
+
+static void lifetime_load(void)
+{
+    FILE *f = fopen(KWS_LIFETIME_FILE, "r");
+    if (!f) return;
+    fscanf(f, "wh=%f\n", &g_lifetime_wh);
+    fclose(f);
+    if (g_lifetime_wh < 0.0f) g_lifetime_wh = 0.0f;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: lifetime loaded %.2f Wh (%.4f kWh)",
+              g_lifetime_wh, g_lifetime_wh / 1000.0f);
+}
+
+static void lifetime_save(void)
+{
+    FILE *f = fopen(KWS_LIFETIME_FILE, "w");
+    if (!f) return;
+    fprintf(f, "wh=%.4f\n", g_lifetime_wh);
+    fclose(f);
+    g_lifetime_dirty = 0u;
+}
 
 /* ============================================================================
  * SECTION C — RELAY
@@ -484,6 +536,8 @@ typedef struct {
     float    peak_w;
     float    peak_a;
     float    rate_rs;
+    uint32_t start_uptime_s;   /* improvement #2: g_uptime_s at sess_start() */
+    uint32_t duration_s;       /* improvement #2: filled at sess_end()        */
 } EvSess_t;
 
 static EvSess_t  g_ev;
@@ -501,41 +555,50 @@ static void sess_save(void)
     FILE *f = fopen(KWS_SESSION_FILE, "w");
     if (!f) return;
     fprintf(f, "active=%u\nvehicle=%u\nid=%u\nwh_off=%.4f\nwh_sess=%.4f\n"
-               "segs=%u\npeak_w=%.2f\npeak_a=%.4f\nrate=%.4f\n",
+               "segs=%u\npeak_w=%.2f\npeak_a=%.4f\nrate=%.4f\n"
+               "start_up=%u\n",                        /* improvement #2 */
             (unsigned)g_ev.active, (unsigned)g_ev.vehicle, g_ev.session_id,
             g_ev.wh_offset, g_ev.wh_session, g_ev.seg_count,
-            g_ev.peak_w, g_ev.peak_a, g_ev.rate_rs);
+            g_ev.peak_w, g_ev.peak_a, g_ev.rate_rs,
+            (unsigned)g_ev.start_uptime_s);
     fclose(f);
 }
 
 static bool sess_load(void)
 {
-    unsigned int ua = 0, uv = 0;
+    unsigned int ua = 0, uv = 0, ustart = 0;
     FILE *f = fopen(KWS_SESSION_FILE, "r");
     if (!f) return false;
     memset(&g_ev, 0, sizeof(g_ev));
     fscanf(f, "active=%u\nvehicle=%u\nid=%u\nwh_off=%f\nwh_sess=%f\n"
-              "segs=%u\npeak_w=%f\npeak_a=%f\nrate=%f\n",
+              "segs=%u\npeak_w=%f\npeak_a=%f\nrate=%f\n"
+              "start_up=%u\n",
            &ua, &uv, &g_ev.session_id,
            &g_ev.wh_offset, &g_ev.wh_session, &g_ev.seg_count,
-           &g_ev.peak_w, &g_ev.peak_a, &g_ev.rate_rs);
+           &g_ev.peak_w, &g_ev.peak_a, &g_ev.rate_rs,
+           &ustart);
     fclose(f);
-    g_ev.active  = (uint8_t)ua;
-    g_ev.vehicle = (uint8_t)uv;
+    g_ev.active          = (uint8_t)ua;
+    g_ev.vehicle         = (uint8_t)uv;
+    g_ev.start_uptime_s  = (uint32_t)ustart;  /* 0 if old file without field */
     return (bool)g_ev.active;
 }
 
 static void sess_start(uint8_t veh)
 {
-    g_ev.active     = 1;
-    g_ev.vehicle    = veh;
+    g_ev.active          = 1;
+    g_ev.vehicle         = veh;
     g_ev.session_id++;
-    g_ev.wh_offset  = (float)ReadCh(KWS_CH_ENERGY) / 10.0f;
-    g_ev.wh_session = 0.0f;
-    g_ev.seg_count  = 1;
-    g_ev.peak_w     = 0.0f;
-    g_ev.peak_a     = 0.0f;
-    g_ev.rate_rs    = g_rate_rs;
+    g_ev.wh_offset       = (float)ReadCh(KWS_CH_ENERGY) / 10.0f;
+    g_ev.wh_session      = 0.0f;
+    g_ev.seg_count       = 1;
+    g_ev.peak_w          = 0.0f;
+    g_ev.peak_a          = 0.0f;
+    g_ev.rate_rs         = g_rate_rs;
+    g_ev.start_uptime_s  = g_uptime_s;   /* improvement #2: record start time */
+    g_ev.duration_s      = 0;
+    PubCh(KWS_CH_SESS_ACTIVE,  1);       /* improvement #10: tell display      */
+    PubCh(KWS_CH_SESS_ELAPSED, 0);
     sess_save();
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "KWS303WF: Session START id=%u veh=%s",
@@ -554,13 +617,16 @@ static void sess_mqtt(void)
     float old_kl = (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_OLD_KMPL    : KWS_VEH4_OLD_KMPL;
     float km     = kwh * km_pkw;
     float saved  = km / old_kl * KWS_PETROL_RS_PER_L - cost;
+    /* improvement #2: duration_s | improvement #7: uptime_s for ordering   */
     snprintf(g_mqtt_pending_pl, sizeof(g_mqtt_pending_pl),
              "{\"vehicle\":\"%s\",\"kwh\":%.3f,\"cost_rs\":%.2f,"
              "\"km\":%.1f,\"saved_rs\":%.2f,\"segments\":%u,"
-             "\"peak_w\":%.1f,\"peak_a\":%.3f}",
+             "\"peak_w\":%.1f,\"peak_a\":%.3f,"
+             "\"duration_s\":%u,\"uptime_s\":%u}",
              (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
              kwh, cost, km, saved, g_ev.seg_count,
-             g_ev.peak_w, g_ev.peak_a);
+             g_ev.peak_w, g_ev.peak_a,
+             (unsigned)g_ev.duration_s, (unsigned)g_uptime_s);
     g_mqtt_pending = 1;
 }
 
@@ -571,25 +637,64 @@ static void sess_summary(void)
     float km   = kwh * ((g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_KM_PER_KWH : KWS_VEH4_KM_PER_KWH);
     float pet  = km  / ((g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_OLD_KMPL   : KWS_VEH4_OLD_KMPL)
                      * KWS_PETROL_RS_PER_L;
+    uint32_t hh = g_ev.duration_s / 3600u;
+    uint32_t mm = (g_ev.duration_s % 3600u) / 60u;
+    uint32_t ss = g_ev.duration_s % 60u;
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"=== EV Session Summary ===");
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Vehicle : %s",
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Vehicle  : %s",
               (g_ev.vehicle==KWS_VEH_2W)?KWS_VEH2_NAME:KWS_VEH4_NAME);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Energy  : %.3f kWh", kwh);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Cost    : Rs %.2f @ Rs %.2f/unit",cost,g_ev.rate_rs);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Range   : %.1f km", km);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Petrol  : Rs %.2f for same km", pet);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  SAVED   : Rs %.2f", pet-cost);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Segs    : %u  Peak: %.1fW / %.3fA",
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Duration : %02u:%02u:%02u (%u s)",
+              (unsigned)hh,(unsigned)mm,(unsigned)ss,(unsigned)g_ev.duration_s);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Energy   : %.3f kWh", kwh);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Cost     : Rs %.2f @ Rs %.2f/unit",cost,g_ev.rate_rs);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Range    : %.1f km", km);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Petrol   : Rs %.2f for same km", pet);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  SAVED    : Rs %.2f", pet-cost);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Segs     : %u  Peak: %.1fW / %.3fA",
               g_ev.seg_count, g_ev.peak_w, g_ev.peak_a);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"  Lifetime : %.2f kWh total",
+              g_lifetime_wh / 1000.0f);
+}
+
+/* improvement #4: append one CSV row to history file */
+static void history_append(void)
+{
+    FILE *f = fopen(KWS_HISTORY_FILE, "a");
+    if (!f) return;
+    float kwh  = g_ev.wh_session / 1000.0f;
+    float cost = kwh * g_ev.rate_rs;
+    float km   = kwh * ((g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_KM_PER_KWH : KWS_VEH4_KM_PER_KWH);
+    fprintf(f, "%u,%s,%.3f,%.2f,%.1f,%u,%u,%.1f,%.3f\n",
+            g_ev.session_id,
+            (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
+            kwh, cost, km,
+            (unsigned)g_ev.duration_s, (unsigned)g_ev.seg_count,
+            g_ev.peak_w, g_ev.peak_a);
+    fclose(f);
 }
 
 static void sess_end(void)
 {
     if (!g_ev.active) return;
+    /* improvement #2: compute duration before clearing active flag */
+    g_ev.duration_s = (g_uptime_s > g_ev.start_uptime_s)
+                      ? (g_uptime_s - g_ev.start_uptime_s) : 0u;
     g_ev.active = 0; g_ad = AD_IDLE;
-    sess_summary(); sess_mqtt();
+
+    /* improvement #8: credit this session's energy to lifetime total */
+    g_lifetime_wh += g_ev.wh_session;
+    if (g_lifetime_wh < 0.0f) g_lifetime_wh = 0.0f;
+    lifetime_save();
+
+    sess_summary();
+    history_append();    /* improvement #4: write CSV row */
+    sess_mqtt();
+
     FILE *f = fopen(KWS_SESSION_FILE,"w");
     if (f) { fprintf(f,"active=0\n"); fclose(f); }
+
+    PubCh(KWS_CH_SESS_ACTIVE,  0);   /* improvement #10: clear session flag  */
+    PubCh(KWS_CH_SESS_ELAPSED, 0);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: Session ENDED");
 }
 
@@ -611,8 +716,21 @@ static void sess_tick(void)
         if (a > g_ev.peak_a) g_ev.peak_a = a;
         float cost = (g_ev.wh_session/1000.0f) * g_ev.rate_rs;
         PubCh(KWS_CH_EVCOST, (int)(cost * 100.0f));
+
+        /* improvement #2: publish elapsed session time to Ch13 */
+        uint32_t elapsed = (g_uptime_s > g_ev.start_uptime_s)
+                           ? (g_uptime_s - g_ev.start_uptime_s) : 0u;
+        PubCh(KWS_CH_SESS_ELAPSED, (int)elapsed);
+
         static uint32_t s_sv = 0;
-        if (++s_sv >= 60) { s_sv = 0; sess_save(); }
+        if (++s_sv >= 60) {
+            s_sv = 0;
+            sess_save();
+            /* improvement #8: persist lifetime Wh snapshot every 60 s */
+            float snap = g_lifetime_wh + g_ev.wh_session;
+            FILE *lf = fopen(KWS_LIFETIME_FILE, "w");
+            if (lf) { fprintf(lf, "wh=%.4f\n", snap); fclose(lf); }
+        }
     } else {
         PubCh(KWS_CH_EVCOST, 0);
     }
@@ -620,10 +738,10 @@ static void sess_tick(void)
     if (!g_auto_en) return;
     switch (g_ad) {
     case AD_IDLE:
-        if (w >= KWS_DETECT_W_MIN) { g_ad=AD_DETECTING; g_adTick=1; g_adWsum=w; }
+        if (w >= g_detect_w_min) { g_ad=AD_DETECTING; g_adTick=1; g_adWsum=w; }
         break;
     case AD_DETECTING:
-        if (w < KWS_DETECT_W_MIN) { g_ad=AD_IDLE; break; }
+        if (w < g_detect_w_min) { g_ad=AD_IDLE; break; }
         g_adWsum += w;
         if (++g_adTick >= KWS_DETECT_S) {
             float avg = g_adWsum / (float)g_adTick;
@@ -633,7 +751,7 @@ static void sess_tick(void)
         }
         break;
     case AD_CHARGING:
-        if (w < KWS_DETECT_W_MIN) { if (++g_endTk >= KWS_END_S) sess_end(); }
+        if (w < g_detect_w_min) { if (++g_endTk >= KWS_END_S) sess_end(); }
         else { g_endTk=0; }
         break;
     }
@@ -650,7 +768,28 @@ static void on_session(void)
     sess_start(veh);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: Session reset by [+] button");
 }
-static void on_reserved(void) { addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: P20[-] pressed"); }
+/* improvement #3 — [-] (P20) cycles vehicle profile.
+ * Active session: ends current session and immediately restarts with the
+ *   other vehicle type — history row is written for the partial session.
+ * Idle: toggles the preferred vehicle so the next auto-detect uses it.    */
+static void on_reserved(void)
+{
+    if (g_ev.active) {
+        uint8_t new_veh = (g_ev.vehicle == KWS_VEH_2W) ? KWS_VEH_4W : KWS_VEH_2W;
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+                  "KWS303WF: [-] vehicle %s → %s (session restart)",
+                  (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
+                  (new_veh   ==KWS_VEH_2W)   ? KWS_VEH2_NAME : KWS_VEH4_NAME);
+        sess_end();
+        sess_start(new_veh);
+    } else {
+        static uint8_t s_next_veh = KWS_VEH_2W;
+        s_next_veh = (s_next_veh == KWS_VEH_2W) ? KWS_VEH_4W : KWS_VEH_2W;
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+                  "KWS303WF: [-] next session vehicle = %s",
+                  (s_next_veh==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME);
+    }
+}
 
 /* ============================================================================
  * SECTION H — CONSOLE COMMANDS
@@ -669,24 +808,77 @@ static commandResult_t CMD_Rate(const void*x,const char*c,const char*a,int f)
     return CMD_RES_OK;
 }
 
+/* improvement #6: runtime detect threshold command */
+static commandResult_t CMD_DetectW(const void*x,const char*c,const char*a,int f)
+{
+    if(!a||!*a){
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_detect_w: %.1f W",g_detect_w_min);
+        return CMD_RES_OK;
+    }
+    float v = (float)atof(a);
+    if (v < 50.0f || v > 10000.0f) {
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_detect_w: value must be 50-10000 W");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    g_detect_w_min = v;
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_detect_w set %.1f W",g_detect_w_min);
+    return CMD_RES_OK;
+}
+
+/* improvement #4: dump history CSV over log */
+static commandResult_t CMD_HistoryDump(const void*x,const char*c,const char*a,int f)
+{
+    FILE *fh = fopen(KWS_HISTORY_FILE, "r");
+    if (!fh) {
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_history: no history file yet");
+        return CMD_RES_OK;
+    }
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "id,veh,kwh,cost_rs,km,duration_s,segs,peak_w,peak_a");
+    char line[128];
+    while (fgets(line, sizeof(line), fh)) {
+        /* strip trailing newline for clean log output */
+        size_t l = strlen(line);
+        if (l > 0 && line[l-1] == '\n') line[l-1] = '\0';
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"%s", line);
+    }
+    fclose(fh);
+    return CMD_RES_OK;
+}
+
+/* improvement #4: clear history file */
+static commandResult_t CMD_HistoryClear(const void*x,const char*c,const char*a,int f)
+{
+    FILE *fh = fopen(KWS_HISTORY_FILE, "w");
+    if (fh) { fclose(fh); }
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_history: cleared");
+    return CMD_RES_OK;
+}
+
 static commandResult_t CMD_Sess2W (const void*x,const char*c,const char*a,int f){if(g_ev.active)sess_end();sess_start(KWS_VEH_2W);return CMD_RES_OK;}
 static commandResult_t CMD_Sess4W (const void*x,const char*c,const char*a,int f){if(g_ev.active)sess_end();sess_start(KWS_VEH_4W);return CMD_RES_OK;}
 static commandResult_t CMD_SessEnd(const void*x,const char*c,const char*a,int f){sess_end();return CMD_RES_OK;}
 
 static commandResult_t CMD_SessStat(const void*x,const char*c,const char*a,int f)
 {
+    uint32_t elapsed = (g_ev.active && g_uptime_s > g_ev.start_uptime_s)
+                       ? (g_uptime_s - g_ev.start_uptime_s) : 0u;
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "KWS Session: %s  veh=%s  kWh=%.3f  cost=Rs%.2f  segs=%u",
+              "KWS Session: %s  veh=%s  kWh=%.3f  cost=Rs%.2f  segs=%u  elapsed=%um%02us",
               g_ev.active?"ACTIVE":"idle",
               (g_ev.vehicle==KWS_VEH_2W)?KWS_VEH2_NAME:
               (g_ev.vehicle==KWS_VEH_4W)?KWS_VEH4_NAME:"none",
               g_ev.wh_session/1000.0f,
               g_ev.wh_session/1000.0f*g_ev.rate_rs,
-              g_ev.seg_count);
+              g_ev.seg_count,
+              (unsigned)(elapsed/60), (unsigned)(elapsed%60));
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "  relay=%s  auto=%s  uptime=%us",
+              "  relay=%s  auto=%s  detect_w=%.0fW  uptime=%us",
               g_relay_closed?"CLOSED":"OPEN",
-              g_auto_en?"ON":"OFF",(unsigned)g_uptime_s);
+              g_auto_en?"ON":"OFF",
+              g_detect_w_min, (unsigned)g_uptime_s);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "  lifetime=%.2f Wh  (%.4f kWh total)", g_lifetime_wh, g_lifetime_wh/1000.0f);
     return CMD_RES_OK;
 }
 
@@ -694,6 +886,27 @@ static commandResult_t CMD_SessAuto(const void*x,const char*c,const char*a,int f
 {
     g_auto_en=!g_auto_en;
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: auto-detect %s",g_auto_en?"ON":"OFF");
+    return CMD_RES_OK;
+}
+
+/* improvement #8: show or manually set lifetime Wh counter               */
+static commandResult_t CMD_Lifetime(const void*x,const char*c,const char*a,int f)
+{
+    if (a && *a) {
+        float v = (float)atof(a);
+        if (v < 0.0f) return CMD_RES_BAD_ARGUMENT;
+        g_lifetime_wh = v;
+        lifetime_save();
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+                  "kws_lifetime set %.2f Wh (%.4f kWh)", v, v/1000.0f);
+    } else {
+        float total = g_lifetime_wh + (g_ev.active ? g_ev.wh_session : 0.0f);
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+                  "kws_lifetime: %.2f Wh saved + %.2f Wh active = %.4f kWh total",
+                  g_lifetime_wh,
+                  g_ev.active ? g_ev.wh_session : 0.0f,
+                  total/1000.0f);
+    }
     return CMD_RES_OK;
 }
 
@@ -709,6 +922,8 @@ void KWS303WF_Init(void)
     HAL_PIN_SetOutputValue(KWS_RELAY_PIN_ON,  0);
     HAL_PIN_SetOutputValue(KWS_RELAY_PIN_OFF, 0);
     relay_open();
+
+    lifetime_load();   /* improvement #8: restore odometer from flash */
 
     /* NTC init — seed on first ntc_tick() call */
     g_ntc_seeded    = 0u;
@@ -741,11 +956,15 @@ void KWS303WF_Init(void)
     CMD_RegisterCommand("kws_relay_off",        CMD_RelayOff,     NULL);
     CMD_RegisterCommand("kws_ch8_set",          CMD_Ch8Set,       NULL);
     CMD_RegisterCommand("kws_rate",             CMD_Rate,         NULL);
+    CMD_RegisterCommand("kws_detect_w",         CMD_DetectW,      NULL);   /* #6 */
     CMD_RegisterCommand("kws_session2w",        CMD_Sess2W,       NULL);
     CMD_RegisterCommand("kws_session4w",        CMD_Sess4W,       NULL);
     CMD_RegisterCommand("kws_session_end",      CMD_SessEnd,      NULL);
     CMD_RegisterCommand("kws_session_stat",     CMD_SessStat,     NULL);
     CMD_RegisterCommand("kws_session_auto",     CMD_SessAuto,     NULL);
+    CMD_RegisterCommand("kws_history_dump",     CMD_HistoryDump,  NULL);   /* #4 */
+    CMD_RegisterCommand("kws_history_clear",    CMD_HistoryClear, NULL);   /* #4 */
+    CMD_RegisterCommand("kws_lifetime",         CMD_Lifetime,     NULL);   /* #8 */
     CMD_RegisterCommand("kws_ntc_status",       CMD_NtcStatus,    NULL);
     CMD_RegisterCommand("kws_ntc_alarm_reset",  CMD_NtcAlarmReset,NULL);
 
@@ -768,11 +987,19 @@ void KWS303WF_RunEverySecond(void)
     g_uptime_s++;
 
     if (g_mqtt_pending) {
-        char cmd[400];
-        snprintf(cmd, sizeof(cmd), "publishMQTT %s %s",
-                 KWS_MQTT_TOPIC, g_mqtt_pending_pl);
-        g_mqtt_pending = 0;
-        CMD_ExecuteCommand(cmd, 0);
+        /* improvement #9: only attempt publish when WiFi is up.
+         * Flag stays set if WiFi is down — retried on next tick when connected.
+         * Prevents blocking RunEverySecond() for 4-20 s on TCP connect timeout. */
+        if (ReadCh(KWS_CH_WIFI) == 0) {
+            addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+                      "KWS303WF: MQTT publish deferred — WiFi down");
+        } else {
+            char cmd[400];
+            snprintf(cmd, sizeof(cmd), "publishMQTT %s %s",
+                     KWS_MQTT_TOPIC, g_mqtt_pending_pl);
+            g_mqtt_pending = 0;
+            CMD_ExecuteCommand(cmd, 0);
+        }
     }
 
     relay_pulse_tick();
