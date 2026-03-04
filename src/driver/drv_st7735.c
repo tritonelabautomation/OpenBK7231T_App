@@ -9,64 +9,56 @@
  * Example:   startDriver ST7735 14 16 9 17 15 24
  *
  * ── CHANNEL INPUT MAP ────────────────────────────────────────────────────
- *   Ch 1  = Voltage      (V  × 100,  e.g. 22150 = 221.50 V)     from drv_ht7017
- *   Ch 2  = Current      (A  × 1000, e.g.   550 =   0.550 A)    from drv_ht7017
- *   Ch 3  = Power        (W  × 10,   e.g.  1217 = 121.7 W)      from drv_ht7017
- *   Ch 4  = Frequency    (Hz × 100,  e.g.  4990 =  49.90 Hz)    from drv_ht7017
- *   Ch 5  = Power Factor (PF × 1000, e.g.   980 =   0.980)      from drv_ht7017
- *   Ch 6  = Energy       (Wh × 10,   e.g.  4700 = 470.0 Wh)     from drv_ht7017
- *   Ch 7  = Alarm state  (0=OK 1=OV 2=UV 3=OC 4=OP)             from drv_ht7017
- *   Ch 8  = Relay state  (0=open/safe, 100=closed/on)            from drv_kws303wf
- *   Ch 9  = Temperature  (°C × 100,  e.g. 2716 = 27.16 °C)      from drv_kws303wf
- *   Ch 10 = EV cost      (Rs × 100,  e.g.  376 =  3.76 Rs)      from drv_kws303wf
- *   Ch 11 = WiFi status  (0=disconnected, 1=connected)           from OBK core
+ *   Ch 1  = Voltage      (V  × 100)    e.g. 22150 = 221.50 V
+ *   Ch 2  = Current      (A  × 1000)   e.g.   550 = 0.550 A
+ *   Ch 3  = Power        (W  × 10)     e.g.  1217 = 121.7 W
+ *   Ch 4  = Frequency    (Hz × 100)    e.g.  4990 = 49.90 Hz
+ *   Ch 5  = Power Factor (PF × 1000)   e.g.   980 = 0.980
+ *   Ch 6  = Energy       (Wh × 10)     e.g.  4700 = 470.0 Wh
+ *   Ch 7  = Alarm state  (0=OK 1=OV 2=UV 3=OC 4=OP)
+ *   Ch 8  = Relay state  (0=open, 100=closed)
+ *   Ch 9  = Temperature  (°C × 100)    e.g.  2716 = 27.16 °C
+ *   Ch 10 = EV cost      (Rs × 100)    e.g.   376 = 3.76
+ *   Ch 11 = WiFi status  (0=disconnected, 1=connected)
  *
  * ── DISPLAY LAYOUT  80×160px ─────────────────────────────────────────────
- *   Y=  0 h= 10  OFF/ON  [alarm]  NoWF/WiFi    GREY status bar
- *   Y= 11 h= 24  221.50                    V   RED    (scale 2)
- *   Y= 35 h= 24    0.550                   A   CYAN   (scale 2)
- *   Y= 59 h= 24  121.7                     W   YELLOW (scale 2)
- *   Y= 83 h= 23  ₹   3.76                     GREEN  (scale 2)
- *   Y=106 h= 18  000.47kWh                    CYAN   (scale 1)
- *   Y=124 h= 18  0.98PF     49.9Hz            RED  | BLUE  (scale 1)
- *   Y=142 h= 18  27.16C     01:23             ORANGE|WHITE (scale 1)
- *   PIXEL SUM: 10+1+24+24+24+23+18+18+18 = 160px
+ *   Y=  0 h=10   OFF/ON  [alarm]  NoWF/WiFi    status bar
+ *   Y= 11 h=24   221.50 V                      RED    scale-2
+ *   Y= 35 h=24     0.550 A                     CYAN   scale-2
+ *   Y= 59 h=24   121.7 W                       YELLOW scale-2
+ *   Y= 83 h=23   ₹  3.76                       GREEN  scale-2
+ *   Y=106 h=18   000.47kWh                     CYAN   scale-1
+ *   Y=124 h=18   0.98PF  49.9Hz                RED|BLUE scale-1
+ *   Y=142 h=18   27.16C  01:23                 ORANGE|WHITE scale-1
+ *   TOTAL: 10+1+24+24+24+23+18+18+18 = 160px
  *
- * ── RUPEE SYMBOL ₹  (U+20B9) ─────────────────────────────────────────────
- *   UTF-8 encodes ₹ as 0xE2 0x82 0xB9 (3 bytes, all > 0x7E).
- *   DrawString() walks byte-by-byte → DrawChar() ASCII guard fires → "???".
+ * ── RUPEE GLYPH ₹ (U+20B9) ───────────────────────────────────────────────
+ *   UTF-8 ₹ = 0xE2 0x82 0xB9 (3 bytes > 0x7E → font guard maps all to '?').
+ *   Solution: custom 5×7 glyph at font index 95, sentinel RUPEE_CHAR='\x01'.
+ *   DrawChar() catches '\x01' before the ASCII guard → uses index 95.
+ *   snprintf uses "\x01%5.2f" to embed the symbol.
  *
- *   FIX: custom 5×7 glyph at font table index 95, addressed via sentinel
- *   RUPEE_CHAR = '\x01' (ASCII SOH — never used by OBK console/MQTT).
- *   DrawChar() intercepts RUPEE_CHAR before the ASCII range guard.
- *   snprintf format: "\x01%5.2f" → ₹ symbol rendered as one glyph.
+ *   Glyph bytes: {0x7F, 0x05, 0x0D, 0x15, 0x21}
+ *   Pixel map (col-major, bit0=top row):
  *
- *   Glyph {0x7F,0x05,0x0D,0x15,0x21} verified pixel map:
- *     # # # # #    row 0  full top bar
- *     # . . . .    row 1  left stem only
- *     # # # # .    row 2  second bar (4-wide)
- *     # . # . .    row 3  diagonal pivot
- *     # . . # .    row 4  diagonal
- *     # . . . #    row 5  diagonal foot
- *     # . . . .    row 6  left anchor
+ *     col:  0     1     2     3     4
+ *          0x7F  0x05  0x0D  0x15  0x21
  *
- *   Cost delta vs "Rs" prefix:
- *     Flash  : +13 bytes (+5 glyph, +8 DrawChar branch)
- *     RAM    : net 0  (p_cost −4, p_alm +4)
- *     CPU    : −1 DrawChar() call per dirty cost-row redraw
- *     Layout : frees 12px in cost row (72px vs 84px at scale 2)
+ *     r0:  ##  ##  ##  ##  ##    full top bar
+ *     r1:  ##                    left stem only
+ *     r2:  ##  ##  ##  ##        second bar (4-wide) ← ₹ signature
+ *     r3:  ##      ##            diagonal pivot
+ *     r4:  ##          ##        diagonal
+ *     r5:  ##              ##    diagonal foot
+ *     r6:  ##                    left anchor
  *
- * ── FIX-ST-1  (alarm indicator) ─────────────────────────────────────────
- *   Original: alarm strings drawn unconditionally every tick without erase.
- *   Fix: dirty-flag cache (p_alm) + full zone_update() erase on change.
- *   alarm raw value clamped to [0,4] before array index use (OOB guard).
- *   Trailing-space padding on alarm strings ensures full zone is erased
- *   on transition (e.g. "OV " → "   " clears all three character columns).
+ *   At scale-2 each pixel = 2×2 dots → 10×14px character cell.
+ *   This matches standard embedded ₹ rendering (Adafruit GFX / u8g2).
  *
- * ── OPENBK IDIOM ─────────────────────────────────────────────────────────
- *   Dirty-flag pattern: each cell caches its last rendered string.
- *   Redraw only on string change. No polling state. No timers.
- *   CHANNEL_Get() is the sole data source — driver is fully passive.
+ * ── FIX-ST-1: alarm indicator ────────────────────────────────────────────
+ *   Original code drew alarm string every tick without erasing first.
+ *   Fix: dirty-flag cache (p_alm) + zone_update() erase on change.
+ *   Raw alarm value clamped [0,4] before array index use.
  */
 
 #include "../obk_config.h"
@@ -87,27 +79,26 @@
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════
- * SECTION A — CHANNEL ASSIGNMENTS  (must match other drivers)
+ * SECTION A — CHANNEL ASSIGNMENTS
  * ══════════════════════════════════════════════════════════════════════════ */
-#define DISP_CH_VOLTAGE   1   /* V  × 100   */
-#define DISP_CH_CURRENT   2   /* A  × 1000  */
-#define DISP_CH_POWER     3   /* W  × 10    */
-#define DISP_CH_FREQ      4   /* Hz × 100   */
-#define DISP_CH_PF        5   /* PF × 1000  */
-#define DISP_CH_ENERGY    6   /* Wh × 10    */
-#define DISP_CH_ALARM     7   /* 0-4        */
-#define DISP_CH_RELAY     8   /* 0=open 100=closed */
-#define DISP_CH_TEMP      9   /* °C × 100   */
-#define DISP_CH_EVCOST   10   /* Rs × 100   */
-#define DISP_CH_WIFI     11   /* 0/1        */
+#define DISP_CH_VOLTAGE   1
+#define DISP_CH_CURRENT   2
+#define DISP_CH_POWER     3
+#define DISP_CH_FREQ      4
+#define DISP_CH_PF        5
+#define DISP_CH_ENERGY    6
+#define DISP_CH_ALARM     7
+#define DISP_CH_RELAY     8
+#define DISP_CH_TEMP      9
+#define DISP_CH_EVCOST   10
+#define DISP_CH_WIFI     11
 
-/* ── Rupee sentinel ──────────────────────────────────────────────────────
- * ASCII 0x01 (SOH) is intercepted by DrawChar() and mapped to the custom
- * ₹ glyph at font table index 95.  The byte never leaves this driver.    */
+/* Rupee sentinel: ASCII SOH (0x01), never used by OBK console or MQTT.
+ * Intercepted in DrawChar() → mapped to custom ₹ glyph at font index 95. */
 #define RUPEE_CHAR  '\x01'
 
 /* ══════════════════════════════════════════════════════════════════════════
- * SECTION B — TFT HARDWARE PINS & GLOBAL STATE
+ * SECTION B — HARDWARE PINS & GLOBAL STATE
  * ══════════════════════════════════════════════════════════════════════════ */
 static int     g_pin_sck = ST7735_DEFAULT_SCK;
 static int     g_pin_sda = ST7735_DEFAULT_SDA;
@@ -117,7 +108,6 @@ static int     g_pin_cs  = ST7735_DEFAULT_CS;
 static int     g_pin_blk = ST7735_DEFAULT_BLK;
 static uint8_t g_initialized = 0;
 
-/* console text-mode state */
 static uint8_t  g_cur_col   = 0;
 static uint8_t  g_cur_row   = 0;
 static uint16_t g_fg_colour = ST7735_WHITE;
@@ -162,11 +152,7 @@ static void TFT_WriteData8(uint8_t d)
  * SECTION D — DELAY
  * ══════════════════════════════════════════════════════════════════════════ */
 extern int rtos_delay_milliseconds(uint32_t num_ms);
-
-static void ST7735_Delay(uint32_t ms)
-{
-    (void)rtos_delay_milliseconds(ms);
-}
+static void ST7735_Delay(uint32_t ms) { (void)rtos_delay_milliseconds(ms); }
 
 /* ══════════════════════════════════════════════════════════════════════════
  * SECTION E — ST7735S CONTROLLER INIT
@@ -208,7 +194,7 @@ static void TFT_InitController(void)
 
     TFT_WriteCmd(ST77_CASET);
     TFT_WriteData8(0x00); TFT_WriteData8(ST7735_COL_OFFSET);
-    TFT_WriteData8(0x00); TFT_WriteData8(ST7735_COL_OFFSET + ST7735_WIDTH - 1);
+    TFT_WriteData8(0x00); TFT_WriteData8(ST7735_COL_OFFSET + ST7735_WIDTH  - 1);
     TFT_WriteCmd(ST77_RASET);
     TFT_WriteData8(0x00); TFT_WriteData8(ST7735_ROW_OFFSET);
     TFT_WriteData8(0x00); TFT_WriteData8(ST7735_ROW_OFFSET + ST7735_HEIGHT - 1);
@@ -249,7 +235,7 @@ static void TFT_SetWindow(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1)
 void ST7735_FillRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t colour)
 {
     if (!g_initialized) return;
-    if (x >= ST7735_WIDTH || y >= ST7735_HEIGHT) return;
+    if (x >= ST7735_WIDTH  || y >= ST7735_HEIGHT) return;
     if (x + w > ST7735_WIDTH)  w = (uint8_t)(ST7735_WIDTH  - x);
     if (y + h > ST7735_HEIGHT) h = (uint8_t)(ST7735_HEIGHT - y);
     TFT_SetWindow(x, y, (uint8_t)(x+w-1), (uint8_t)(y+h-1));
@@ -265,28 +251,27 @@ void ST7735_FillScreen(uint16_t colour)
     ST7735_FillRect(0, 0, ST7735_WIDTH, ST7735_HEIGHT, colour);
 }
 
-/* ── 5×7 font table ─────────────────────────────────────────────────────
+/* ── 5×7 font table ──────────────────────────────────────────────────────
  *
- *   Indices 0–94  : ASCII 0x20 (' ') through 0x7E ('~')  — standard
- *   Index  95     : ₹ Indian Rupee Sign (U+20B9)          — custom glyph
+ *   Index  0 – 94 : ASCII 0x20 (' ') through 0x7E ('~')
+ *   Index 95      : ₹  Indian Rupee Sign (U+20B9) — custom glyph
  *
- *   Storage format: column-major, 5 bytes per glyph, bit 0 = top row.
+ *   Column-major storage: 5 bytes per glyph, bit 0 = top row (row 0).
  *
- *   ₹ glyph  {0x7F, 0x05, 0x0D, 0x15, 0x23}  (index 95):
+ *   ₹ glyph at index 95: {0x7F, 0x05, 0x0D, 0x15, 0x21}
  *
- *     col:   0     1     2     3     4
- *           0x7A  0x05  0x0D  0x15  0x22
+ *     col:  0     1     2     3     4
+ *          0x7F  0x05  0x0D  0x15  0x21
  *
- *     # # # # #    row 0  full top bar
- *     # . . . .    row 1  left stem only
- *     # # # # .    row 2  second bar (4-wide)
- *     # . # . .    row 3  diagonal pivot
- *     # . . # .    row 4  diagonal
- *     # . . . #    row 5  diagonal foot
- *     # . . . .    row 6  left anchor
+ *     r0: [full top bar — all 5 cols]
+ *     r1: [left stem only]
+ *     r2: [second bar — cols 0-3, 4-wide]
+ *     r3: [left stem] [col 2 — diagonal pivot]
+ *     r4: [left stem]          [col 3]
+ *     r5: [left stem]                   [col 4]
+ *     r6: [left anchor]
  *
  *   Addressed via RUPEE_CHAR = '\x01' sentinel in DrawChar().
- *   Flash cost of this extra row: +5 bytes.
  * ──────────────────────────────────────────────────────────────────────── */
 static const uint8_t g_font5x7[][5] = {
     /* 0x20 ' '  */ {0x00,0x00,0x00,0x00,0x00},
@@ -384,29 +369,28 @@ static const uint8_t g_font5x7[][5] = {
     /* 0x7C '|'  */ {0x00,0x00,0x7F,0x00,0x00},
     /* 0x7D '}'  */ {0x00,0x41,0x36,0x08,0x00},
     /* 0x7E '~'  */ {0x10,0x08,0x08,0x10,0x08},
-    /* idx 95  ₹ */ {0x7F,0x05,0x0D,0x15,0x21},
+    /* idx 95 ₹  */ {0x7F,0x05,0x0D,0x15,0x21},
 };
 
-/* ── DrawChar — handles standard ASCII and RUPEE_CHAR sentinel ───────────
+/* ── DrawChar: standard ASCII + RUPEE_CHAR sentinel ─────────────────────
  *
- *  RUPEE_CHAR ('\x01') is caught BEFORE the ASCII range guard and mapped
- *  to glyph index 95.  All other characters use the original path.
- *  Cost of the new branch: 1 compare + 1 conditional jump per DrawChar()
- *  call.  Only fires when a cell containing '\x01' is being redrawn.
+ *  '\x01' (RUPEE_CHAR) is checked BEFORE the ASCII range guard so it is
+ *  not clamped to '?'.  It resolves to font index 95 = ₹ glyph.
+ *  All other characters use the existing (c - 0x20) index.
+ *
+ *  CPU cost of new branch: 1 compare + 1 jump, fires only for cost-row redraws.
  * ──────────────────────────────────────────────────────────────────────── */
 void ST7735_DrawChar(uint8_t x, uint8_t y, char c,
                      uint16_t fg, uint16_t bg, uint8_t scale)
 {
     uint8_t glyph_idx;
-
     if (!g_initialized) return;
 
-    /* Resolve glyph index — RUPEE_CHAR must precede the ASCII guard */
     if ((uint8_t)c == (uint8_t)RUPEE_CHAR) {
-        glyph_idx = 95u;                     /* ₹ custom glyph              */
+        glyph_idx = 95u;                      /* ₹ custom glyph at index 95  */
     } else {
-        if (c < 0x20 || c > 0x7E) c = '?';  /* clamp unknown chars         */
-        glyph_idx = (uint8_t)(c - 0x20);     /* standard ASCII 0x20-0x7E   */
+        if (c < 0x20 || c > 0x7E) c = '?';   /* clamp unknown chars         */
+        glyph_idx = (uint8_t)(c - 0x20);      /* standard ASCII 0x20-0x7E   */
     }
 
     if (x + FONT_W * scale > ST7735_WIDTH)  return;
@@ -423,7 +407,9 @@ void ST7735_DrawChar(uint8_t x, uint8_t y, char c,
             for (col = 0; col < FONT_W; col++) {
                 uint16_t colour = ((gl[col] >> row) & 1) ? fg : bg;
                 uint8_t hi = colour >> 8, lo = colour & 0xFF;
-                for (t = 0; t < scale; t++) { SPI_WriteByte(hi); SPI_WriteByte(lo); }
+                for (t = 0; t < scale; t++) {
+                    SPI_WriteByte(hi); SPI_WriteByte(lo);
+                }
             }
         }
     }
@@ -442,14 +428,14 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * SECTION G — DISPLAY LAYOUT & CHANNEL-TO-SCREEN RENDERING
+ * SECTION G — DISPLAY LAYOUT & RENDERING
  *
- *  Dirty-flag pattern: each cell caches its last rendered string.
- *  zone_update() returns immediately when string is unchanged.
- *  All channel values come from CHANNEL_Get() — driver is fully passive.
+ *  Dirty-flag pattern: each cell has a string cache.
+ *  zone_update() redraws only when the string changes.
+ *  CHANNEL_Get() is the sole data source — driver is fully passive.
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/* Row geometry (pixel-verified, 1px natural gap at Y=10) */
+/* Row geometry — pixel-verified, 1px gap at Y=10 */
 #define ROW_STA_Y     0
 #define ROW_STA_H    10
 #define ROW_V_Y      11
@@ -467,15 +453,13 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define ROW_TTY     142
 #define ROW_TTH      18
 
-#define S2  2    /* scale-2: char cell 12×14 px */
-#define S1  1    /* scale-1: char cell  6× 7 px */
+#define S2  2
+#define S1  1
 
-/* Label column for V/A/W rows */
 #define LBL_W    (FONT_W * S2)
 #define LBL_X    (ST7735_WIDTH - LBL_W)
 #define VAL_W    LBL_X
 
-/* Split zones for PF|Hz and Temp|Timer rows */
 #define PF_X     0
 #define PF_W    38
 #define HZ_X    38
@@ -485,29 +469,22 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define TM_X    40
 #define TM_W    40
 
-/* Status bar zones */
 #define STA_RLY_X   0
 #define STA_RLY_W  22
-#define STA_ALM_X  29   /* FIX-ST-1: named constant — prevents magic-number OOB */
+#define STA_ALM_X  29
 #define STA_ALM_W  22
 #define STA_WIF_X  56
 #define STA_WIF_W  24
 
-/* ── Dirty-flag string caches ─────────────────────────────────────────────
- *  p_cost: was [14] for "Rs%5.2f" (7 chars + NUL).
- *          now [10] for "\x01%5.2f" (6 chars + NUL). Saves 4 bytes RAM.
- *  p_alm:  new [4] for alarm indicator (FIX-ST-1).  +4 bytes RAM.
- *  Net RAM delta: 0 bytes.
- * ──────────────────────────────────────────────────────────────────────── */
+/* Dirty-flag string caches */
 static char p_v[10], p_a[10], p_w[10];
-static char p_cost[10];   /* ₹ format "\x01%5.2f" = 6 chars, was [14] for "Rs" */
+static char p_cost[10];   /* "\x01%5.2f" = max 7 chars incl NUL */
 static char p_kwh[14];
 static char p_pf[10], p_hz[10];
 static char p_tc[10], p_tmr[8];
-static char p_rly[4], p_wif[6];
-static char p_alm[4];     /* FIX-ST-1: alarm indicator dirty-flag cache */
+static char p_rly[4], p_wif[6], p_alm[4];
 
-/* Clear zone, draw string, update cache — skip if string unchanged */
+/* Erase zone, draw string, update cache — skips if string unchanged */
 static void zone_update(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
                         const char *str, uint16_t fg, uint8_t sc,
                         char *cache, uint8_t cache_sz)
@@ -520,130 +497,18 @@ static void zone_update(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
     ST7735_DrawString(x, ty, str, fg, ST7735_BLACK, (uint8_t)sc);
 }
 
-/* Static V/A/W unit labels — drawn once at init and after st7735_clear */
+/* V / A / W unit labels — drawn once at init and after st7735_clear */
 static void draw_static_labels(void)
 {
-    uint8_t vy = (uint8_t)(ROW_V_Y + (ROW_V_H - FONT_H * S2) / 2);
-    uint8_t ay = (uint8_t)(ROW_A_Y + (ROW_A_H - FONT_H * S2) / 2);
-    uint8_t wy = (uint8_t)(ROW_W_Y + (ROW_W_H - FONT_H * S2) / 2);
+    uint8_t vy = (uint8_t)(ROW_V_Y    + (ROW_V_H    - FONT_H * S2) / 2);
+    uint8_t ay = (uint8_t)(ROW_A_Y    + (ROW_A_H    - FONT_H * S2) / 2);
+    uint8_t wy = (uint8_t)(ROW_W_Y    + (ROW_W_H    - FONT_H * S2) / 2);
     ST7735_DrawChar((uint8_t)LBL_X, vy, 'V', ST7735_RED,    ST7735_BLACK, S2);
     ST7735_DrawChar((uint8_t)LBL_X, ay, 'A', ST7735_CYAN,   ST7735_BLACK, S2);
     ST7735_DrawChar((uint8_t)LBL_X, wy, 'W', ST7735_YELLOW, ST7735_BLACK, S2);
 }
 
-extern int CHANNEL_Get(int ch);
-
-static void display_tick(void)
-{
-    char buf[16];
-
-    /* Decode all channels to physical units */
-    float v    = (float)CHANNEL_Get(DISP_CH_VOLTAGE) / 100.0f;
-    float a    = (float)CHANNEL_Get(DISP_CH_CURRENT) / 1000.0f;
-    float w    = (float)CHANNEL_Get(DISP_CH_POWER)   / 10.0f;
-    float hz   = (float)CHANNEL_Get(DISP_CH_FREQ)    / 100.0f;
-    float pf   = (float)CHANNEL_Get(DISP_CH_PF)      / 1000.0f;
-    float kwh  = (float)CHANNEL_Get(DISP_CH_ENERGY)  / 1000.0f;  /* Wh×10→kWh */
-    float tc   = (float)CHANNEL_Get(DISP_CH_TEMP)    / 100.0f;
-    float cost = (float)CHANNEL_Get(DISP_CH_EVCOST)  / 100.0f;
-    int   rly  = CHANNEL_Get(DISP_CH_RELAY);
-    int   wif  = CHANNEL_Get(DISP_CH_WIFI);
-    int   alm_raw = CHANNEL_Get(DISP_CH_ALARM);
-
-    /* FIX-ST-1: clamp alarm to [0,4] before use as array index.
-     * Prevents OOB read if channel holds a corrupt value.        */
-    int alm = (alm_raw >= 0 && alm_raw <= 4) ? alm_raw : 0;
-
-    static uint32_t s_sec = 0;
-    s_sec++;
-
-    /* ── STATUS BAR: relay state ──────────────────────────────────────── */
-    {
-        const char *rs = (rly >= 100) ? "ON " : "OFF";
-        uint16_t rc = (rly >= 100) ? ST7735_GREEN : ST7735_GREY;
-        if (strncmp(rs, p_rly, sizeof(p_rly)) != 0) {
-            strncpy(p_rly, rs, sizeof(p_rly) - 1);
-            ST7735_FillRect(STA_RLY_X, ROW_STA_Y, STA_RLY_W, ROW_STA_H, ST7735_BLACK);
-            ST7735_DrawString(STA_RLY_X, ROW_STA_Y + 1, rs, rc, ST7735_BLACK, S1);
-        }
-    }
-
-    /* ── STATUS BAR: alarm indicator (FIX-ST-1) ──────────────────────────
-     * Trailing space pads each string to 3 chars so zone_update()'s
-     * FillRect fully erases any prior wider string on transition.        */
-    {
-        const char *an[] = {"   ", "OV ", "UV ", "OC ", "OP "};
-        zone_update(STA_ALM_X, ROW_STA_Y, STA_ALM_W, ROW_STA_H,
-                    an[alm], ST7735_RED, S1, p_alm, sizeof(p_alm));
-    }
-
-    /* ── STATUS BAR: wifi state ────────────────────────────────────────── */
-    {
-        const char *ws = wif ? "WiFi" : "NoWF";
-        uint16_t wc = wif ? ST7735_BLUE : ST7735_GREY;
-        if (strncmp(ws, p_wif, sizeof(p_wif)) != 0) {
-            strncpy(p_wif, ws, sizeof(p_wif) - 1);
-            ST7735_FillRect(STA_WIF_X, ROW_STA_Y, STA_WIF_W, ROW_STA_H, ST7735_BLACK);
-            ST7735_DrawString(STA_WIF_X, ROW_STA_Y + 1, ws, wc, ST7735_BLACK, S1);
-        }
-    }
-
-    /* ── VOLTAGE ────────────────────────────────────────────────────────── */
-    snprintf(buf, sizeof(buf), "%5.1f", v);
-    zone_update(0, ROW_V_Y, VAL_W, ROW_V_H, buf,
-                ST7735_RED, S2, p_v, sizeof(p_v));
-
-    /* ── CURRENT ────────────────────────────────────────────────────────── */
-    snprintf(buf, sizeof(buf), "%5.3f", a);
-    zone_update(0, ROW_A_Y, VAL_W, ROW_A_H, buf,
-                ST7735_CYAN, S2, p_a, sizeof(p_a));
-
-    /* ── POWER ──────────────────────────────────────────────────────────── */
-    snprintf(buf, sizeof(buf), "%5.1f", w);
-    zone_update(0, ROW_W_Y, VAL_W, ROW_W_H, buf,
-                ST7735_YELLOW, S2, p_w, sizeof(p_w));
-
-    /* ── EV COST ─────────────────────────────────────────────────────────
-     * '\x01' = RUPEE_CHAR is resolved to the ₹ glyph (index 95) inside
-     * DrawChar().  Produces "₹  3.76" on screen at scale 2.
-     * One fewer DrawChar() call vs the old "Rs%5.2f" format.            */
-    snprintf(buf, sizeof(buf), "\x01%5.2f", cost);
-    zone_update(0, ROW_COST_Y, ST7735_WIDTH, ROW_COST_H, buf,
-                ST7735_GREEN, S2, p_cost, sizeof(p_cost));
-
-    /* ── ENERGY (kWh) ───────────────────────────────────────────────────── */
-    snprintf(buf, sizeof(buf), "%06.3fkWh", kwh);
-    zone_update(0, ROW_KWH_Y, ST7735_WIDTH, ROW_KWH_H, buf,
-                ST7735_CYAN, S1, p_kwh, sizeof(p_kwh));
-
-    /* ── POWER FACTOR ───────────────────────────────────────────────────── */
-    snprintf(buf, sizeof(buf), "%.2fPF", pf);
-    zone_update(PF_X, ROW_PFHZ_Y, PF_W, ROW_PFHZ_H, buf,
-                ST7735_RED, S1, p_pf, sizeof(p_pf));
-
-    /* ── FREQUENCY ──────────────────────────────────────────────────────── */
-    snprintf(buf, sizeof(buf), "%.1fHz", hz);
-    zone_update(HZ_X, ROW_PFHZ_Y, HZ_W, ROW_PFHZ_H, buf,
-                ST7735_BLUE, S1, p_hz, sizeof(p_hz));
-
-    /* ── TEMPERATURE ────────────────────────────────────────────────────── */
-    snprintf(buf, sizeof(buf), "%05.2fC", tc);
-    zone_update(TC_X, ROW_TTY, TC_W, ROW_TTH, buf,
-                ST7735_ORANGE, S1, p_tc, sizeof(p_tc));
-
-    /* ── TIMER (mm:ss rolling, resets at 99:59) ─────────────────────────── */
-    uint32_t mm = (s_sec / 60) % 100;
-    uint32_t ss =  s_sec % 60;
-    snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)mm, (unsigned)ss);
-    zone_update(TM_X, ROW_TTY, TM_W, ROW_TTH, buf,
-                ST7735_WHITE, S1, p_tmr, sizeof(p_tmr));
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
- * SECTION H — CONSOLE COMMANDS
- * ══════════════════════════════════════════════════════════════════════════ */
-
-/* Helper: reset all dirty caches (forces full redraw on next tick) */
+/* Reset all dirty caches → forces full redraw on next tick */
 static void caches_clear(void)
 {
     memset(p_v,   '\0', sizeof(p_v));
@@ -660,6 +525,112 @@ static void caches_clear(void)
     memset(p_alm, '\0', sizeof(p_alm));
 }
 
+extern int CHANNEL_Get(int ch);
+
+static void display_tick(void)
+{
+    char buf[16];
+
+    float v    = (float)CHANNEL_Get(DISP_CH_VOLTAGE) / 100.0f;
+    float a    = (float)CHANNEL_Get(DISP_CH_CURRENT) / 1000.0f;
+    float w    = (float)CHANNEL_Get(DISP_CH_POWER)   / 10.0f;
+    float hz   = (float)CHANNEL_Get(DISP_CH_FREQ)    / 100.0f;
+    float pf   = (float)CHANNEL_Get(DISP_CH_PF)      / 1000.0f;
+    float kwh  = (float)CHANNEL_Get(DISP_CH_ENERGY)  / 1000.0f;
+    float tc   = (float)CHANNEL_Get(DISP_CH_TEMP)    / 100.0f;
+    float cost = (float)CHANNEL_Get(DISP_CH_EVCOST)  / 100.0f;
+    int   rly  = CHANNEL_Get(DISP_CH_RELAY);
+    int   wif  = CHANNEL_Get(DISP_CH_WIFI);
+    int   alm_raw = CHANNEL_Get(DISP_CH_ALARM);
+
+    /* Clamp alarm to [0,4] before array index use — FIX-ST-1 OOB guard */
+    int alm = (alm_raw >= 0 && alm_raw <= 4) ? alm_raw : 0;
+
+    static uint32_t s_sec = 0;
+    s_sec++;
+
+    /* STATUS BAR — relay */
+    {
+        const char *rs = (rly >= 100) ? "ON " : "OFF";
+        uint16_t    rc = (rly >= 100) ? ST7735_GREEN : ST7735_GREY;
+        if (strncmp(rs, p_rly, sizeof(p_rly)) != 0) {
+            strncpy(p_rly, rs, sizeof(p_rly) - 1);
+            ST7735_FillRect(STA_RLY_X, ROW_STA_Y, STA_RLY_W, ROW_STA_H, ST7735_BLACK);
+            ST7735_DrawString(STA_RLY_X, ROW_STA_Y + 1, rs, rc, ST7735_BLACK, S1);
+        }
+    }
+
+    /* STATUS BAR — alarm (FIX-ST-1: cached + zone erase + trailing spaces) */
+    {
+        const char *an[] = {"   ", "OV ", "UV ", "OC ", "OP "};
+        zone_update(STA_ALM_X, ROW_STA_Y, STA_ALM_W, ROW_STA_H,
+                    an[alm], ST7735_RED, S1, p_alm, sizeof(p_alm));
+    }
+
+    /* STATUS BAR — wifi */
+    {
+        const char *ws = wif ? "WiFi" : "NoWF";
+        uint16_t    wc = wif ? ST7735_BLUE : ST7735_GREY;
+        if (strncmp(ws, p_wif, sizeof(p_wif)) != 0) {
+            strncpy(p_wif, ws, sizeof(p_wif) - 1);
+            ST7735_FillRect(STA_WIF_X, ROW_STA_Y, STA_WIF_W, ROW_STA_H, ST7735_BLACK);
+            ST7735_DrawString(STA_WIF_X, ROW_STA_Y + 1, ws, wc, ST7735_BLACK, S1);
+        }
+    }
+
+    /* VOLTAGE */
+    snprintf(buf, sizeof(buf), "%5.1f", v);
+    zone_update(0, ROW_V_Y, VAL_W, ROW_V_H, buf,
+                ST7735_RED, S2, p_v, sizeof(p_v));
+
+    /* CURRENT */
+    snprintf(buf, sizeof(buf), "%5.3f", a);
+    zone_update(0, ROW_A_Y, VAL_W, ROW_A_H, buf,
+                ST7735_CYAN, S2, p_a, sizeof(p_a));
+
+    /* POWER */
+    snprintf(buf, sizeof(buf), "%5.1f", w);
+    zone_update(0, ROW_W_Y, VAL_W, ROW_W_H, buf,
+                ST7735_YELLOW, S2, p_w, sizeof(p_w));
+
+    /* EV COST — '\x01' = RUPEE_CHAR → rendered as ₹ glyph by DrawChar() */
+    snprintf(buf, sizeof(buf), "\x01%5.2f", cost);
+    zone_update(0, ROW_COST_Y, ST7735_WIDTH, ROW_COST_H, buf,
+                ST7735_GREEN, S2, p_cost, sizeof(p_cost));
+
+    /* ENERGY */
+    snprintf(buf, sizeof(buf), "%06.3fkWh", kwh);
+    zone_update(0, ROW_KWH_Y, ST7735_WIDTH, ROW_KWH_H, buf,
+                ST7735_CYAN, S1, p_kwh, sizeof(p_kwh));
+
+    /* POWER FACTOR */
+    snprintf(buf, sizeof(buf), "%.2fPF", pf);
+    zone_update(PF_X, ROW_PFHZ_Y, PF_W, ROW_PFHZ_H, buf,
+                ST7735_RED, S1, p_pf, sizeof(p_pf));
+
+    /* FREQUENCY */
+    snprintf(buf, sizeof(buf), "%.1fHz", hz);
+    zone_update(HZ_X, ROW_PFHZ_Y, HZ_W, ROW_PFHZ_H, buf,
+                ST7735_BLUE, S1, p_hz, sizeof(p_hz));
+
+    /* TEMPERATURE */
+    snprintf(buf, sizeof(buf), "%05.2fC", tc);
+    zone_update(TC_X, ROW_TTY, TC_W, ROW_TTH, buf,
+                ST7735_ORANGE, S1, p_tc, sizeof(p_tc));
+
+    /* TIMER — mm:ss rolling, resets at 99:59 */
+    {
+        uint32_t mm = (s_sec / 60) % 100;
+        uint32_t ss =  s_sec % 60;
+        snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)mm, (unsigned)ss);
+        zone_update(TM_X, ROW_TTY, TM_W, ROW_TTH, buf,
+                    ST7735_WHITE, S1, p_tmr, sizeof(p_tmr));
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * SECTION H — CONSOLE COMMANDS
+ * ══════════════════════════════════════════════════════════════════════════ */
 static commandResult_t CMD_Clear(const void *ctx, const char *cmd,
                                  const char *args, int flags)
 {
@@ -715,10 +686,10 @@ static commandResult_t CMD_Draw(const void *ctx, const char *cmd,
                                 const char *args, int flags)
 {
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
-    int x = 0, y = 0, w = 0, h = 0; uint32_t colour = 0;
+    int x = 0, y = 0, w = 0, h = 0;
+    uint32_t colour = 0;
     sscanf(args, "%d %d %d %d %u", &x, &y, &w, &h, &colour);
-    ST7735_FillRect((uint8_t)x, (uint8_t)y,
-                    (uint8_t)w, (uint8_t)h, (uint16_t)colour);
+    ST7735_FillRect((uint8_t)x,(uint8_t)y,(uint8_t)w,(uint8_t)h,(uint16_t)colour);
     return CMD_RES_OK;
 }
 
@@ -762,7 +733,7 @@ void ST7735_Init(void)
     g_initialized = 1;
     ST7735_FillScreen(ST7735_BLACK);
     draw_static_labels();
-    caches_clear();   /* force full redraw on first RunEverySecond() tick */
+    caches_clear();
 
     CMD_RegisterCommand("st7735_clear",      CMD_Clear,      NULL);
     CMD_RegisterCommand("st7735_brightness", CMD_Brightness, NULL);
@@ -773,7 +744,7 @@ void ST7735_Init(void)
     CMD_RegisterCommand("st7735_scale",      CMD_Scale,      NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: ready 80x160 rupee=idx95 sentinel=0x01 — reads Ch1-11");
+              "ST7735: ready 80x160 rupee=idx95 sentinel=0x01 reads Ch1-11");
 }
 
 void ST7735_RunEverySecond(void)
