@@ -41,9 +41,9 @@
  *   DrawChar() intercepts RUPEE_CHAR before the ASCII range guard.
  *   snprintf format: "\x01%5.2f" → ₹ symbol rendered as one glyph.
  *
- *   Glyph {0x7F,0x05,0x0D,0x15,0x23} verified pixel map:
+ *   Glyph {0x7F,0x05,0x0D,0x15,0x21} verified pixel map:
  *     # # # # #    row 0  top bar  (full width)
- *     # . . . #    row 1  left stem + right serif
+ *     # . . . .    row 1  left stem only
  *     # # # # .    row 2  second bar  ← ₹ signature (4-wide)
  *     # . # . .    row 3  diagonal hint
  *     # . . # .    row 4  diagonal
@@ -278,7 +278,7 @@ void ST7735_FillScreen(uint16_t colour)
  *           0x7A  0x05  0x0D  0x15  0x22
  *
  *     # # # # #    row 0  — top bar (full width)
- *     # . . . #    row 1  — left stem + right serif
+ *     # . . . .    row 1  — left stem only
  *     # # # # .    row 2  — second bar (4-wide, ₹ double-bar signature)
  *     # . # . .    row 3  — stem + diagonal hint
  *     # . . # .    row 4  — diagonal continues
@@ -384,7 +384,7 @@ static const uint8_t g_font5x7[][5] = {
     /* 0x7C '|'  */ {0x00,0x00,0x7F,0x00,0x00},
     /* 0x7D '}'  */ {0x00,0x41,0x36,0x08,0x00},
     /* 0x7E '~'  */ {0x10,0x08,0x08,0x10,0x08},
-    /* idx 95  ₹ */ {0x7F,0x05,0x0D,0x15,0x23},
+    /* idx 95  ₹ */ {0x7F,0x05,0x0D,0x15,0x21},
 };
 
 /* ── DrawChar — handles standard ASCII and RUPEE_CHAR sentinel ───────────
