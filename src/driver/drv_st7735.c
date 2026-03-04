@@ -38,22 +38,68 @@
  *   DrawChar() catches '\x01' before the ASCII guard → uses index 95.
  *   snprintf uses "\x01%5.2f" to embed the symbol.
  *
- *   Glyph bytes: {0x7F, 0x05, 0x0D, 0x15, 0x21}
- *   Pixel map (col-major, bit0=top row):
+ *   ── GLYPH BUG ANALYSIS & FIX ──────────────────────────────────────────
+ *
+ *   BROKEN bytes: {0x7F, 0x05, 0x0D, 0x15, 0x21}
+ *   FIXED  bytes: {0x7F, 0x05, 0x05, 0x0D, 0x15}
+ *
+ *   Root cause (3 wrong bytes, all in columns 2-4):
+ *
+ *   col2: 0x0D (broken) → 0x05 (fixed)
+ *     0x0D = 0b00001101 → lights rows 0, 2, AND 3
+ *     0x05 = 0b00000101 → lights rows 0 and 2 only
+ *     Bug: bit3 set in col2 placed a stray pixel at (col2, row3).
+ *     At scale=2, this extends col2's lit region from display-rows 4-5
+ *     (the 2nd bar) into display-rows 6-7 (where the diagonal should START).
+ *     The 2nd bar and the diagonal fuse into one 4-display-pixel-tall block
+ *     at col2, destroying the visual separation that makes ₹ recognisable.
+ *
+ *   col3: 0x15 (broken) → 0x0D (fixed)
+ *     0x15 = 0b00010101 → lights rows 0, 2, 4  (skips row3)
+ *     0x0D = 0b00001101 → lights rows 0, 2, 3
+ *     Bug: the broken byte has the diagonal dot at row4, not row3.
+ *     Combined with broken col2 having a stray dot at row3, the diagonal
+ *     appeared to jump unevenly: col2→r3, col3→r4, col4→r5 looks correct
+ *     on paper but fuses badly at scale=2 because col2's r3 merges with
+ *     the 2nd bar above it (col2 has r2 AND r3 both lit = 4 display pixels).
+ *     Fixed col3=0x0D: diagonal step is at row3 (display-rows 6-7), clean.
+ *     Also ensures 2nd bar extends through col3 at row2.
+ *
+ *   col4: 0x21 (broken) → 0x15 (fixed)
+ *     0x21 = 0b00100001 → lights rows 0 and 5
+ *     0x15 = 0b00010101 → lights rows 0, 2, and 4
+ *     Bug: 0x21 only lights row5 in the lower half, leaving row4 dark.
+ *     The diagonal step from col3(fixed→row3) to col4 jumped TWO glyph
+ *     rows (row3→row5), producing a visually disconnected tail dot at
+ *     display-rows 10-11, isolated from the diagonal above it.
+ *     Also critically: 0x21 has NO bit2 set, so col4 was ABSENT from the
+ *     2nd bar at row2 — making the 2nd bar only 4-wide when it should be
+ *     5-wide for clear ₹ identification.
+ *     Fixed col4=0x15: bit2 puts col4 in the 2nd bar (5-wide bar now),
+ *     bit4 puts the diagonal step at row4 (display-rows 8-9), connecting
+ *     cleanly to col3's step at row3.
+ *
+ *   Final pixel map for FIXED glyph {0x7F, 0x05, 0x05, 0x0D, 0x15}:
  *
  *     col:  0     1     2     3     4
- *          0x7F  0x05  0x0D  0x15  0x21
+ *          0x7F  0x05  0x05  0x0D  0x15
  *
- *     r0:  ##  ##  ##  ##  ##    full top bar
+ *     r0:  ##  ##  ##  ##  ##    full 5-wide top bar
  *     r1:  ##                    left stem only
- *     r2:  ##  ##  ##  ##        second bar (4-wide) ← ₹ signature
- *     r3:  ##      ##            diagonal pivot
- *     r4:  ##          ##        diagonal
- *     r5:  ##              ##    diagonal foot
+ *     r2:  ##  ##  ##  ##  ##    full 5-wide SECOND BAR ← ₹ identity
+ *     r3:  ##              ##    stem + diagonal step 1 at col3
+ *     r4:  ##                ##  stem + diagonal step 2 at col4
+ *     r5:  ##                    left stem
  *     r6:  ##                    left anchor
  *
- *   At scale-2 each pixel = 2×2 dots → 10×14px character cell.
- *   This matches standard embedded ₹ rendering (Adafruit GFX / u8g2).
+ *   At scale-2 each glyph pixel = 2×2 display pixels → 10×14px cell:
+ *
+ *     Display rows 0-1:   ██████████  ← full 10px top bar
+ *     Display rows 2-3:   ██          ← 2px left stem
+ *     Display rows 4-5:   ██████████  ← full 10px SECOND BAR
+ *     Display rows 6-7:   ██      ██  ← stem + diagonal col3
+ *     Display rows 8-9:   ██        ████  ← stem + diagonal col4
+ *     Display rows 10-13: ██          ← stem tail
  *
  * ── FIX-ST-1: alarm indicator ────────────────────────────────────────────
  *   Original code drew alarm string every tick without erasing first.
@@ -258,17 +304,20 @@ void ST7735_FillScreen(uint16_t colour)
  *
  *   Column-major storage: 5 bytes per glyph, bit 0 = top row (row 0).
  *
- *   ₹ glyph at index 95: {0x7F, 0x05, 0x0D, 0x15, 0x21}
+ *   ₹ glyph at index 95: {0x7F, 0x05, 0x05, 0x0D, 0x15}   ← FIXED
+ *
+ *   Previous (broken) bytes were {0x7F, 0x05, 0x0D, 0x15, 0x21}.
+ *   The fix corrects THREE bytes — see file header for full analysis.
  *
  *     col:  0     1     2     3     4
- *          0x7F  0x05  0x0D  0x15  0x21
+ *          0x7F  0x05  0x05  0x0D  0x15
  *
  *     r0: [full top bar — all 5 cols]
  *     r1: [left stem only]
- *     r2: [second bar — cols 0-3, 4-wide]
- *     r3: [left stem] [col 2 — diagonal pivot]
- *     r4: [left stem]          [col 3]
- *     r5: [left stem]                   [col 4]
+ *     r2: [full second bar — all 5 cols]  ← broken had only 4-wide here
+ *     r3: [left stem]  [col3 diagonal]    ← broken had stray col2 pixel
+ *     r4: [left stem]        [col4 diag]  ← broken skipped row, isolated dot
+ *     r5: [left stem]
  *     r6: [left anchor]
  *
  *   Addressed via RUPEE_CHAR = '\x01' sentinel in DrawChar().
@@ -369,7 +418,25 @@ static const uint8_t g_font5x7[][5] = {
     /* 0x7C '|'  */ {0x00,0x00,0x7F,0x00,0x00},
     /* 0x7D '}'  */ {0x00,0x41,0x36,0x08,0x00},
     /* 0x7E '~'  */ {0x10,0x08,0x08,0x10,0x08},
-    /* idx 95 ₹  */ {0x7F,0x05,0x0D,0x15,0x21},
+    /*
+     * idx 95  ₹  FIXED — was {0x7F,0x05,0x0D,0x15,0x21}
+     *
+     * Three bytes corrected (cols 2, 3, 4):
+     *   col2: 0x0D → 0x05  clears spurious bit3 that fused 2nd bar+diagonal
+     *   col3: 0x15 → 0x0D  moves diagonal step from row4 to row3, adds row2
+     *                       so the 2nd bar is now full 5-wide
+     *   col4: 0x21 → 0x15  adds row2 (completes 5-wide 2nd bar), moves
+     *                       diagonal foot from isolated row5 to connected row4
+     *
+     * Result at scale=2 (10×14 display pixels):
+     *   ██████████  d-rows 0-1   full top bar
+     *   ██          d-rows 2-3   left stem
+     *   ██████████  d-rows 4-5   full 5-wide SECOND BAR  ← ₹ identity
+     *   ██      ██  d-rows 6-7   stem + diagonal col3
+     *   ██        ██ d-rows 8-9  stem + diagonal col4
+     *   ██          d-rows 10-13 stem tail
+     */
+    /* idx 95 ₹  */ {0x7F, 0x05, 0x05, 0x0D, 0x15},  /* FIXED */
 };
 
 /* ── DrawChar: standard ASCII + RUPEE_CHAR sentinel ─────────────────────
@@ -429,13 +496,8 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 
 /* ══════════════════════════════════════════════════════════════════════════
  * SECTION G — DISPLAY LAYOUT & RENDERING
- *
- *  Dirty-flag pattern: each cell has a string cache.
- *  zone_update() redraws only when the string changes.
- *  CHANNEL_Get() is the sole data source — driver is fully passive.
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/* Row geometry — pixel-verified, 1px gap at Y=10 */
 #define ROW_STA_Y     0
 #define ROW_STA_H    10
 #define ROW_V_Y      11
@@ -476,15 +538,13 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define STA_WIF_X  56
 #define STA_WIF_W  24
 
-/* Dirty-flag string caches */
 static char p_v[10], p_a[10], p_w[10];
-static char p_cost[10];   /* "\x01%5.2f" = max 7 chars incl NUL */
+static char p_cost[10];
 static char p_kwh[14];
 static char p_pf[10], p_hz[10];
 static char p_tc[10], p_tmr[8];
 static char p_rly[4], p_wif[6], p_alm[4];
 
-/* Erase zone, draw string, update cache — skips if string unchanged */
 static void zone_update(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
                         const char *str, uint16_t fg, uint8_t sc,
                         char *cache, uint8_t cache_sz)
@@ -497,7 +557,6 @@ static void zone_update(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
     ST7735_DrawString(x, ty, str, fg, ST7735_BLACK, (uint8_t)sc);
 }
 
-/* V / A / W unit labels — drawn once at init and after st7735_clear */
 static void draw_static_labels(void)
 {
     uint8_t vy = (uint8_t)(ROW_V_Y    + (ROW_V_H    - FONT_H * S2) / 2);
@@ -508,7 +567,6 @@ static void draw_static_labels(void)
     ST7735_DrawChar((uint8_t)LBL_X, wy, 'W', ST7735_YELLOW, ST7735_BLACK, S2);
 }
 
-/* Reset all dirty caches → forces full redraw on next tick */
 static void caches_clear(void)
 {
     memset(p_v,   '\0', sizeof(p_v));
@@ -543,7 +601,6 @@ static void display_tick(void)
     int   wif  = CHANNEL_Get(DISP_CH_WIFI);
     int   alm_raw = CHANNEL_Get(DISP_CH_ALARM);
 
-    /* Clamp alarm to [0,4] before array index use — FIX-ST-1 OOB guard */
     int alm = (alm_raw >= 0 && alm_raw <= 4) ? alm_raw : 0;
 
     static uint32_t s_sec = 0;
@@ -560,7 +617,7 @@ static void display_tick(void)
         }
     }
 
-    /* STATUS BAR — alarm (FIX-ST-1: cached + zone erase + trailing spaces) */
+    /* STATUS BAR — alarm */
     {
         const char *an[] = {"   ", "OV ", "UV ", "OC ", "OP "};
         zone_update(STA_ALM_X, ROW_STA_Y, STA_ALM_W, ROW_STA_H,
@@ -578,47 +635,43 @@ static void display_tick(void)
         }
     }
 
-    /* VOLTAGE */
     snprintf(buf, sizeof(buf), "%5.1f", v);
     zone_update(0, ROW_V_Y, VAL_W, ROW_V_H, buf,
                 ST7735_RED, S2, p_v, sizeof(p_v));
 
-    /* CURRENT */
     snprintf(buf, sizeof(buf), "%5.3f", a);
     zone_update(0, ROW_A_Y, VAL_W, ROW_A_H, buf,
                 ST7735_CYAN, S2, p_a, sizeof(p_a));
 
-    /* POWER */
     snprintf(buf, sizeof(buf), "%5.1f", w);
     zone_update(0, ROW_W_Y, VAL_W, ROW_W_H, buf,
                 ST7735_YELLOW, S2, p_w, sizeof(p_w));
 
-    /* EV COST — '\x01' = RUPEE_CHAR → rendered as ₹ glyph by DrawChar() */
+    /* EV COST — '\x01' sentinel → ₹ glyph via DrawChar().
+     * "%5.2f" produces max 7 chars (e.g. "999.99") → with sentinel = 8 chars.
+     * At scale=2: 7 × 12px = 84px > 80px display width → DrawString clips
+     * the last char for costs ≥ 100.00. For the typical Rs 0–99.99 range
+     * the string is 6 chars × 12px = 72px which fits safely.             */
     snprintf(buf, sizeof(buf), "\x01%5.2f", cost);
     zone_update(0, ROW_COST_Y, ST7735_WIDTH, ROW_COST_H, buf,
                 ST7735_GREEN, S2, p_cost, sizeof(p_cost));
 
-    /* ENERGY */
     snprintf(buf, sizeof(buf), "%06.3fkWh", kwh);
     zone_update(0, ROW_KWH_Y, ST7735_WIDTH, ROW_KWH_H, buf,
                 ST7735_CYAN, S1, p_kwh, sizeof(p_kwh));
 
-    /* POWER FACTOR */
     snprintf(buf, sizeof(buf), "%.2fPF", pf);
     zone_update(PF_X, ROW_PFHZ_Y, PF_W, ROW_PFHZ_H, buf,
                 ST7735_RED, S1, p_pf, sizeof(p_pf));
 
-    /* FREQUENCY */
     snprintf(buf, sizeof(buf), "%.1fHz", hz);
     zone_update(HZ_X, ROW_PFHZ_Y, HZ_W, ROW_PFHZ_H, buf,
                 ST7735_BLUE, S1, p_hz, sizeof(p_hz));
 
-    /* TEMPERATURE */
     snprintf(buf, sizeof(buf), "%05.2fC", tc);
     zone_update(TC_X, ROW_TTY, TC_W, ROW_TTH, buf,
                 ST7735_ORANGE, S1, p_tc, sizeof(p_tc));
 
-    /* TIMER — mm:ss rolling, resets at 99:59 */
     {
         uint32_t mm = (s_sec / 60) % 100;
         uint32_t ss =  s_sec % 60;
