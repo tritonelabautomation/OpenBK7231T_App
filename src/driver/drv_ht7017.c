@@ -21,7 +21,17 @@
  *   Response: D2 D1 D0 CS  (CS = ~(0x6A+reg+D2+D1+D0))
  *
  * CALIBRATION: VoltageSet → CurrentSet → PowerSet (in order)
- *   Use 1kW resistive load. Saved to /ht7017cal.cfg.
+ *   Use 1kW resistive load. Saved to ht7017cal.cfg.
+ *
+ * FIXES in this version:
+ *   FIX-CAL-1: HT7017_CAL_FILE path — removed leading slash.
+ *              "/ht7017cal.cfg" fails on BK7231N LittleFS VFS (fopen returns NULL).
+ *              "ht7017cal.cfg"  works — matches OBK LittleFS path convention.
+ *   FIX-CAL-2: SaveCal() now returns bool; CalibSet commands return CMD_RES_ERROR
+ *              on save failure so WebApp shows an error instead of silent OK.
+ *   FIX-CAL-3: LoadCal() deferred out of HT7017_Init() into RunEverySecond() on
+ *              g_tick==0. LittleFS may not be mounted yet when Init() is called.
+ *   FIX-CAL-4: SaveCal() logs the actual path on failure for easier diagnosis.
  *
  * startDriver HT7017
  */
@@ -67,7 +77,9 @@ static float g_qScale  = HT7017_DEFAULT_POWER_SCALE;
 static float g_sScale  = HT7017_DEFAULT_APPARENT_SCALE;
 static float g_e1Scale = HT7017_DEFAULT_EP1_SCALE;
 static float g_iOffset = HT7017_CURRENT_OFFSET;
-#define HT7017_CAL_FILE "/ht7017cal.cfg"
+
+/* FIX-CAL-1: No leading slash — BK7231N LittleFS VFS requires bare filename. */
+#define HT7017_CAL_FILE "ht7017cal.cfg"
 
 /* Last raw readings captured for calibration commands */
 static uint32_t g_rawV = 0, g_rawI = 0, g_rawP = 0;
@@ -112,6 +124,10 @@ static uint32_t g_goodFr    = 0;
 static uint32_t g_badFr     = 0;
 static uint32_t g_miss      = 0;
 static uint8_t  g_verbose   = 0;
+
+/* FIX-CAL-3: Defer LoadCal() until first RunEverySecond() tick so that
+ * LittleFS is guaranteed to be mounted before we attempt fopen(). */
+static bool     g_calLoaded = false;
 
 /* ═══════════════════════════════════════════════════════════
  * F — REGISTER TABLE
@@ -330,78 +346,159 @@ static void ProcessFrame(uint8_t d2,uint8_t d1,uint8_t d0,uint8_t cs,const Reg_t
 
 /* ═══════════════════════════════════════════════════════════
  * M — CALIBRATION PERSISTENCE
+ *
+ * FIX-CAL-1: Path has no leading slash — BK7231N LittleFS VFS
+ *            does not accept "/filename", only "filename".
+ * FIX-CAL-2: SaveCal() returns bool so callers can propagate
+ *            failure back to the WebApp command result.
+ * FIX-CAL-4: Path is included in the failure log message.
  * ═══════════════════════════════════════════════════════════ */
-static void SaveCal(void)
+static bool SaveCal(void)
 {
-    FILE *f=fopen(HT7017_CAL_FILE,"w");
-    if(!f){addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:cal save fail");return;}
-    fprintf(f,"V=%f\nI=%f\nP=%f\n",g_vScale,g_iScale,g_pScale);
+    FILE *f = fopen(HT7017_CAL_FILE, "w");
+    if (!f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+            "HT7017:cal save fail path=[%s]", HT7017_CAL_FILE);
+        return false;
+    }
+    int r = fprintf(f, "V=%f\nI=%f\nP=%f\n", g_vScale, g_iScale, g_pScale);
     fclose(f);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:cal saved V=%.4f I=%.4f P=%.6f",g_vScale,g_iScale,g_pScale);
+    if (r < 0) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+            "HT7017:cal write fail r=%d", r);
+        return false;
+    }
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+        "HT7017:cal saved V=%.4f I=%.4f P=%.6f", g_vScale, g_iScale, g_pScale);
+    return true;
 }
+
 static void LoadCal(void)
 {
-    FILE *f=fopen(HT7017_CAL_FILE,"r");
-    if(!f){addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:no cal file,using defaults");return;}
-    float v=0,i=0,p=0;
-    int n=fscanf(f,"V=%f\nI=%f\nP=%f\n",&v,&i,&p);
+    FILE *f = fopen(HT7017_CAL_FILE, "r");
+    if (!f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+            "HT7017:no cal file [%s] using defaults", HT7017_CAL_FILE);
+        return;
+    }
+    float v=0, i=0, p=0;
+    int n = fscanf(f, "V=%f\nI=%f\nP=%f\n", &v, &i, &p);
     fclose(f);
-    if(n!=3||v<=0||i<=0||p==0){addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:cal invalid");return;}
-    g_vScale=v;g_iScale=i;g_pScale=p;g_qScale=p;g_sScale=fabsf(p);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:cal loaded V=%.4f I=%.4f P=%.6f",v,i,p);
+    if (n!=3 || v<=0 || i<=0 || p==0) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017:cal invalid n=%d", n);
+        return;
+    }
+    g_vScale=v; g_iScale=i; g_pScale=p; g_qScale=p; g_sScale=fabsf(p);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+        "HT7017:cal loaded V=%.4f I=%.4f P=%.6f", v, i, p);
 }
 
 /* ═══════════════════════════════════════════════════════════
  * N — CONSOLE COMMANDS
+ *
+ * FIX-CAL-2: All three CalibSet commands return CMD_RES_ERROR
+ *            when SaveCal() fails so the WebApp shows an error
+ *            instead of a misleading OK.
  * ═══════════════════════════════════════════════════════════ */
 static commandResult_t c_VoltageSet(const void*x,const char*c,const char*a,int f){
-    if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;
-    float v=(float)atof(a);if(v<=0||!g_rawV)return CMD_RES_BAD_ARGUMENT;
-    float old=g_vScale;g_vScale=(float)g_rawV/v;g_voltage=v;
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:VoltageSet %.2fV %.2f→%.2f",v,old,g_vScale);
-    SaveCal();return CMD_RES_OK;}
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float v=(float)atof(a);
+    if(v<=0||!g_rawV) return CMD_RES_BAD_ARGUMENT;
+    float old=g_vScale; g_vScale=(float)g_rawV/v; g_voltage=v;
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+        "HT7017:VoltageSet %.2fV %.2f→%.2f",v,old,g_vScale);
+    return SaveCal() ? CMD_RES_OK : CMD_RES_ERROR;
+}
 
 static commandResult_t c_CurrentSet(const void*x,const char*c,const char*a,int f){
-    if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;
-    float v=(float)atof(a);if(v<=0||!g_rawI)return CMD_RES_BAD_ARGUMENT;
-    float net=(float)g_rawI-g_iOffset;if(net<=0)return CMD_RES_ERROR;
-    float old=g_iScale;g_iScale=net/v;g_current=v;
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:CurrentSet %.3fA %.2f→%.2f",v,old,g_iScale);
-    SaveCal();return CMD_RES_OK;}
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float v=(float)atof(a);
+    if(v<=0||!g_rawI) return CMD_RES_BAD_ARGUMENT;
+    float net=(float)g_rawI-g_iOffset;
+    if(net<=0) return CMD_RES_ERROR;
+    float old=g_iScale; g_iScale=net/v; g_current=v;
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+        "HT7017:CurrentSet %.3fA %.2f→%.2f",v,old,g_iScale);
+    return SaveCal() ? CMD_RES_OK : CMD_RES_ERROR;
+}
 
 static commandResult_t c_PowerSet(const void*x,const char*c,const char*a,int f){
-    if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;
-    float v=(float)atof(a);if(v<=0||!g_rawP)return CMD_RES_BAD_ARGUMENT;
-    int32_t s=(int32_t)g_rawP;if(s&0x800000)s|=(int32_t)0xFF000000;
-    if(!s)return CMD_RES_ERROR;
-    float old=g_pScale;g_pScale=(float)s/v;g_power=v;g_qScale=g_pScale;g_sScale=fabsf(g_pScale);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:PowerSet %.1fW %.4f→%.4f",v,old,g_pScale);
-    SaveCal();return CMD_RES_OK;}
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    float v=(float)atof(a);
+    if(v<=0||!g_rawP) return CMD_RES_BAD_ARGUMENT;
+    int32_t s=(int32_t)g_rawP;
+    if(s&0x800000) s|=(int32_t)0xFF000000;
+    if(!s) return CMD_RES_ERROR;
+    float old=g_pScale; g_pScale=(float)s/v; g_power=v;
+    g_qScale=g_pScale; g_sScale=fabsf(g_pScale);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+        "HT7017:PowerSet %.1fW %.4f→%.4f",v,old,g_pScale);
+    return SaveCal() ? CMD_RES_OK : CMD_RES_ERROR;
+}
 
-static commandResult_t c_SaveCal(const void*x,const char*c,const char*a,int f){SaveCal();return CMD_RES_OK;}
-static commandResult_t c_LoadCal(const void*x,const char*c,const char*a,int f){LoadCal();return CMD_RES_OK;}
+static commandResult_t c_SaveCal(const void*x,const char*c,const char*a,int f){
+    return SaveCal() ? CMD_RES_OK : CMD_RES_ERROR;
+}
+static commandResult_t c_LoadCal(const void*x,const char*c,const char*a,int f){
+    LoadCal(); return CMD_RES_OK;
+}
 
 static commandResult_t c_EnergyReset(const void*x,const char*c,const char*a,int f){
-    g_wh=g_varh=0;g_ep1_seeded=g_eq1_seeded=false;
+    g_wh=g_varh=0; g_ep1_seeded=g_eq1_seeded=false;
     PubCh(HT_CH_ENERGY,0,1.0f);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:energy reset");return CMD_RES_OK;}
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:energy reset");
+    return CMD_RES_OK;
+}
 
 static commandResult_t c_Status(const void*x,const char*c,const char*a,int f){
     const char*n[]={"OK","OV","UV","OC","OP"};
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017 V=%.2f I=%.3f P=%.2f Hz=%.2f PF=%.4f",g_voltage,g_current,g_power,g_freq,g_pf);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"       Wh=%.4f Alarm=%s heap=%u good=%u bad=%u miss=%u",
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+        "HT7017 V=%.2f I=%.3f P=%.2f Hz=%.2f PF=%.4f",
+        g_voltage,g_current,g_power,g_freq,g_pf);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+        "       Wh=%.4f Alarm=%s heap=%u good=%u bad=%u miss=%u",
         g_wh,n[g_alarm],(unsigned)xPortGetFreeHeapSize(),g_goodFr,g_badFr,g_miss);
-    return CMD_RES_OK;}
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+        "       cal: V=%.4f I=%.4f P=%.6f calLoaded=%d",
+        g_vScale,g_iScale,g_pScale,(int)g_calLoaded);
+    return CMD_RES_OK;
+}
 
-static commandResult_t c_SetOV(const void*x,const char*c,const char*a,int f){if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;g_ovThr=(float)atof(a);addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:OV=%.1f",g_ovThr);return CMD_RES_OK;}
-static commandResult_t c_SetUV(const void*x,const char*c,const char*a,int f){if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;g_uvThr=(float)atof(a);addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:UV=%.1f",g_uvThr);return CMD_RES_OK;}
-static commandResult_t c_SetOC(const void*x,const char*c,const char*a,int f){if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;g_ocThr=(float)atof(a);addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:OC=%.3f",g_ocThr);return CMD_RES_OK;}
-static commandResult_t c_SetOP(const void*x,const char*c,const char*a,int f){if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;g_opThr=(float)atof(a);addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:OP=%.1f",g_opThr);return CMD_RES_OK;}
-static commandResult_t c_Verbose(const void*x,const char*c,const char*a,int f){g_verbose=!g_verbose;addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:verbose %s",g_verbose?"ON":"OFF");return CMD_RES_OK;}
+static commandResult_t c_SetOV(const void*x,const char*c,const char*a,int f){
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    g_ovThr=(float)atof(a);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:OV=%.1f",g_ovThr);
+    return CMD_RES_OK;
+}
+static commandResult_t c_SetUV(const void*x,const char*c,const char*a,int f){
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    g_uvThr=(float)atof(a);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:UV=%.1f",g_uvThr);
+    return CMD_RES_OK;
+}
+static commandResult_t c_SetOC(const void*x,const char*c,const char*a,int f){
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    g_ocThr=(float)atof(a);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:OC=%.3f",g_ocThr);
+    return CMD_RES_OK;
+}
+static commandResult_t c_SetOP(const void*x,const char*c,const char*a,int f){
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    g_opThr=(float)atof(a);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:OP=%.1f",g_opThr);
+    return CMD_RES_OK;
+}
+static commandResult_t c_Verbose(const void*x,const char*c,const char*a,int f){
+    g_verbose=!g_verbose;
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:verbose %s",g_verbose?"ON":"OFF");
+    return CMD_RES_OK;
+}
 static commandResult_t c_Baud(const void*x,const char*c,const char*a,int f){
-    if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+    if(!a||!*a) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     UART_InitUART(atoi(a),HT7017_PARITY_EVEN,0);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:baud=%s 8E1",a);return CMD_RES_OK;}
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"HT7017:baud=%s 8E1",a);
+    return CMD_RES_OK;
+}
 
 /* ═══════════════════════════════════════════════════════════
  * O — PUBLIC GETTERS  (drv_kws303wf reads these)
@@ -426,6 +523,10 @@ void HT7017_Init(void)
     g_emusr=g_alarm=0; g_tripped=false; g_tripAt=0;
     g_s1_tick=0; g_verbose=0;
 
+    /* FIX-CAL-3: Reset deferred-load flag on each Init() call so that a
+     * driver restart (e.g. via startDriver) re-loads calibration correctly. */
+    g_calLoaded = false;
+
     UART_InitReceiveRingBuffer(32);
     UART_InitUART(HT7017_BAUD_RATE, HT7017_PARITY_EVEN, 0);
 
@@ -443,7 +544,12 @@ void HT7017_Init(void)
     CMD_RegisterCommand("HT7017_Verbose",     c_Verbose,     NULL);
     CMD_RegisterCommand("HT7017_Baud",        c_Baud,        NULL);
 
-    LoadCal();
+    /* FIX-CAL-3: LoadCal() is intentionally NOT called here.
+     * On BK7231N, HT7017_Init() runs before LittleFS is mounted,
+     * so fopen() would return NULL and silently discard saved cal.
+     * LoadCal() is called on g_tick==0 in RunEverySecond() instead,
+     * by which time the OS has completed filesystem initialisation. */
+
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
         "HT7017: ready 4800 8E1 | Ch%u=V Ch%u=I Ch%u=P Ch%u=Hz Ch%u=PF Ch%u=Wh Ch%u=Alarm",
         HT_CH_VOLTAGE,HT_CH_CURRENT,HT_CH_POWER,HT_CH_FREQ,
@@ -452,6 +558,13 @@ void HT7017_Init(void)
 
 void HT7017_RunEverySecond(void)
 {
+    /* FIX-CAL-3: Deferred LoadCal() — LittleFS is mounted by the time the
+     * first RunEverySecond() tick fires, so fopen() will succeed here. */
+    if (!g_calLoaded) {
+        g_calLoaded = true;
+        LoadCal();
+    }
+
     int avail=UART_GetDataSize();
     if (avail>=HT7017_RESPONSE_LEN) {
         uint8_t d2=UART_GetByte(0),d1=UART_GetByte(1),
