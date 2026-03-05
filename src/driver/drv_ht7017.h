@@ -163,7 +163,7 @@
 
 // ─── Calibrated scale factors (10-point calibration 2026-02-23) ──────────────
 #define HT7017_DEFAULT_VOLTAGE_SCALE    10961.98f
-#define HT7017_DEFAULT_CURRENT_SCALE    1661.41f
+#define HT7017_DEFAULT_CURRENT_SCALE    2342.02f
 #define HT7017_DEFAULT_POWER_SCALE      -3.1777f
 // FREQ: freq = HT7017_DEFAULT_FREQ_SCALE / raw  (datasheet §5.1.2.4)
 #define HT7017_DEFAULT_FREQ_SCALE       500000.0f
