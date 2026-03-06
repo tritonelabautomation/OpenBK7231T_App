@@ -107,7 +107,12 @@
 #define KWS_SPLIT_W         4500.0f
 #define KWS_RELAY_PIN_ON      8
 #define KWS_RELAY_PIN_OFF     7
-#define KWS_RELAY_PULSE_MS  200
+/* NOTE: KWS_RELAY_PULSE_MS is defined for documentation purposes only.
+ * The actual pulse duration is 1 second (g_uptime_s + 1), enforced by
+ * relay_pulse_tick() called from RunEverySecond(). The 1-second pulse
+ * exceeds the latching relay minimum (≥100ms) with comfortable margin.
+ * A sub-second timer would require RunQuickTick() integration. */
+#define KWS_RELAY_PULSE_MS  200   /* reference only — actual pulse = 1 s via uptime tick */
 #define KWS_BTN_TOGGLE       28
 #define KWS_BTN_SESSION      26
 #define KWS_BTN_RESERVED     20
@@ -172,9 +177,12 @@
 #define KWS_CH_SESS_ACTIVE   12   /* 0=idle 1=active — read by display        */
 #define KWS_CH_SESS_ELAPSED  13   /* seconds since sess_start — display timer  */
 
-#define KWS_SESSION_FILE     "/kws_session.cfg"
-#define KWS_HISTORY_FILE     "/kws_history.csv"   /* append-only session log   */
-#define KWS_LIFETIME_FILE    "/kws_lifetime.cfg"  /* persists cumulative Wh    */
+/* FIX-PATH: BK7231N LittleFS VFS does NOT accept leading slash.
+ * "/filename" → fopen returns NULL silently. "filename" works correctly.
+ * Same fix already applied in drv_ht7017.c (FIX-CAL-1). */
+#define KWS_SESSION_FILE     "kws_session.cfg"
+#define KWS_HISTORY_FILE     "kws_history.csv"   /* append-only session log   */
+#define KWS_LIFETIME_FILE    "kws_lifetime.cfg"  /* persists cumulative Wh    */
 #define KWS_MQTT_TOPIC       "home/ev/session"
 
 /* ============================================================================
@@ -254,7 +262,8 @@ static void relay_open(void)
     g_relay_closed = 0;
     PubCh(KWS_CH_RELAY, 0);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: Relay OPEN (P%d pulsed, load OFF)", KWS_RELAY_PIN_OFF);
+              "KWS303WF: Relay OPEN (HAL%d→GPIO-P8 OFF-coil pulsed, load OFF)",
+              KWS_RELAY_PIN_OFF);
 }
 
 static void relay_close(void)
@@ -263,7 +272,8 @@ static void relay_close(void)
     g_relay_closed = 1;
     PubCh(KWS_CH_RELAY, 100);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: Relay CLOSE (P%d pulsed, load ON)", KWS_RELAY_PIN_ON);
+              "KWS303WF: Relay CLOSE (HAL%d→GPIO-P7 ON-coil pulsed, load ON)",
+              KWS_RELAY_PIN_ON);
 }
 
 static void relay_sync(int ch8_val)
