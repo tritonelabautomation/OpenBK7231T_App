@@ -568,7 +568,14 @@ static void zone_update(uint8_t x, uint8_t y, uint8_t zw, uint8_t zh,
                         const char *str, uint16_t fg, uint8_t sc,
                         char *cache, uint8_t cache_sz)
 {
-    if (strncmp(str, cache, cache_sz) == 0) return;
+    /* BUG-11 FIX: was strncmp(str, cache, cache_sz).
+     * strncmp does NOT stop at '\0' — it compares cache_sz bytes including
+     * any garbage past the null terminator in buf[] (stack-allocated, not
+     * zeroed between calls in display_tick). This caused spurious redraws
+     * every tick for values that hadn't changed.
+     * strcmp() is safe here: str is always null-terminated and shorter than
+     * cache_sz (all snprintf formats produce < 14 chars, caches are 8–14 bytes). */
+    if (strcmp(str, cache) == 0) return;
     strncpy(cache, str, cache_sz - 1);
     cache[cache_sz - 1] = '\0';
     ST7735_FillRect(x, y, zw, zh, ST7735_BLACK);
