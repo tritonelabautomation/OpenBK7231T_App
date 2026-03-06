@@ -55,6 +55,28 @@
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
 #endif
 
+/* ── LittleFS fopen("w") quirk on BK7231N ────────────────────────────────────
+ * On the Beken LittleFS VFS, fopen(path,"w") returns NULL when the file does
+ * not yet exist (it can only TRUNCATE an existing file, not CREATE one).
+ * fopen(path,"a") correctly creates a new file.
+ *
+ * robust_fopen_w(): try "w" first (fast path when file exists); on failure,
+ * touch the file with "a" to create it, then retry "w" to get a write-from-
+ * start handle.  This is safe, O(1), and idempotent.
+ *
+ * Root cause confirmed 2026-03-06: VoltageSet/PowerSet succeeded in RAM but
+ * fopen("ht7017cal.cfg","w") returned NULL on first-ever save after reflash.
+ * ──────────────────────────────────────────────────────────────────────────── */
+static FILE *robust_fopen_w(const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (f) return f;
+    /* File does not exist yet — create it with "a", then open for overwrite. */
+    f = fopen(path, "a");
+    if (f) fclose(f);
+    return fopen(path, "w");
+}
+
 /* ═══════════════════════════════════════════════════════════
  * A — CHANNEL ASSIGNMENTS
  * ═══════════════════════════════════════════════════════════ */
@@ -359,7 +381,7 @@ static void ProcessFrame(uint8_t d2,uint8_t d1,uint8_t d0,uint8_t cs,const Reg_t
  * ═══════════════════════════════════════════════════════════ */
 static bool SaveCal(void)
 {
-    FILE *f = fopen(HT7017_CAL_FILE, "w");
+    FILE *f = robust_fopen_w(HT7017_CAL_FILE);
     if (!f) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
             "HT7017:cal save fail path=[%s]", HT7017_CAL_FILE);
