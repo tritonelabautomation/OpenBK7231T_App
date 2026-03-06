@@ -4,6 +4,22 @@
 #ifndef OBK_CONFIG_H
 #define OBK_CONFIG_H
 
+/* ── KWS-303WF Firmware Version ──────────────────────────────────────────────
+ * SINGLE SOURCE OF TRUTH for all three drivers and the boot splash screen.
+ * Bump KWS_FW_VERSION_PATCH on every bugfix release.
+ * Bump KWS_FW_VERSION_MINOR on every new feature batch.
+ * Bump KWS_FW_VERSION_MAJOR on breaking hardware/channel changes.
+ *
+ * KWS_FW_VERSION_STR  is the string used in logs, HTTP info page, MQTT, and
+ *                     the on-display boot splash.
+ * KWS_FW_BUILD_DATE   is set manually to the ISO date of the release commit.
+ * ────────────────────────────────────────────────────────────────────────── */
+#define KWS_FW_VERSION_MAJOR  1
+#define KWS_FW_VERSION_MINOR  0
+#define KWS_FW_VERSION_PATCH  16
+#define KWS_FW_VERSION_STR    "v1.0.16"
+#define KWS_FW_BUILD_DATE     "2026-03-06"
+
 #define OBK_VARIANT_DEFAULT						0
 #define OBK_VARIANT_BERRY						1
 #define OBK_VARIANT_TUYAMCU						2
