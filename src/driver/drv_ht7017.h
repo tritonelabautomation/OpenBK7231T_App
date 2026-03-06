@@ -72,13 +72,12 @@
  * ║      Clear when value > threshold + hysteresis  (UV)                      ║
  * ║                                                                            ║
  * ║  FIX 3 — Channel scaling made consistent                                  ║
- * ║    All channels now use the same ×100 integer convention:                 ║
- * ║      FREQ:  50.12 Hz  → setChannel 13 5012  (use ReadOnly, display /100) ║
- * ║      PF:    0.95      → setChannel 14 95    (use PowerFactor_div100)      ║
- * ║      EMUSR: bitmask 3 → setChannel 19 300   (×100 like all others)        ║
- * ║      ALARM: state 2   → setChannel 20 2     (raw int, NOT ×100)           ║
- * ║    Alarm channel publishes raw 0-4 (not ×100) — it is a state code,      ║
- * ║    not a measurement. Rules read it as: if ch20 == 1 (OV), etc.           ║
+ * ║    Channels 1-7 use per-measurement multipliers:                          ║
+ * ║      FREQ:  50.12 Hz  → setChannel 4 5012  (÷100 = Hz)                  ║
+ * ║      PF:    0.980     → setChannel 5 980    (÷1000 = PF)                 ║
+ * ║      ALARM: state 2   → setChannel 7 2      (raw int, NOT ×multiplier)   ║
+ * ║    ALARM channel publishes raw 0-4 (not ×any scale) — it is a state      ║
+ * ║    code, not a measurement. Rules read it as: if ch7 == 1 (OV), etc.     ║
  * ║                                                                            ║
  * ║  FIX 4 — Recovery call-count formula corrected                            ║
  * ║    v14: recover_calls = RECOVER_SECONDS * 4 / 5  (wrong, ~20% short)     ║
@@ -88,17 +87,13 @@
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
  * ║  AUTOEXEC CHANNEL TYPES (copy into autoexec.bat)                          ║
- * ║    setChannelType 10 voltage_div10          // Voltage (V)                ║
- * ║    setChannelType 11 current_div1000        // Current (A)                ║
- * ║    setChannelType 12 power_div10            // Power (W)                  ║
- * ║    setChannelType 13 ReadOnly               // Frequency (÷100 = Hz)      ║
- * ║    setChannelType 14 PowerFactor_div100     // Power Factor               ║
- * ║    setChannelType 15 ReadOnly               // Reactive power (VAR)       ║
- * ║    setChannelType 16 ReadOnly               // Apparent power (VA)        ║
- * ║    setChannelType 17 EnergyTotal_kWh_div1000 // Active energy (Wh×1000)  ║
- * ║    setChannelType 18 ReadOnly               // Reactive energy (VARh)     ║
- * ║    setChannelType 19 ReadOnly               // EMUSR bitmask (÷100)       ║
- * ║    setChannelType 20 ReadOnly               // Alarm state 0-4            ║
+ * ║    setChannelType 1  voltage_div100            // Voltage (V)             ║
+ * ║    setChannelType 2  current_div1000           // Current (A)             ║
+ * ║    setChannelType 3  power_div10               // Power (W)               ║
+ * ║    setChannelType 4  ReadOnly                  // Frequency (÷100 = Hz)   ║
+ * ║    setChannelType 5  PowerFactor_div1000       // Power Factor            ║
+ * ║    setChannelType 6  EnergyTotal_kWh_div10000  // Energy (Wh×10)         ║
+ * ║    setChannelType 7  ReadOnly                  // Alarm state 0-4         ║
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
  * ║  CALIBRATION HISTORY                                                       ║
@@ -211,21 +206,34 @@
 #define HT7017_PROT_HYSTERESIS_A        0.1f    // A
 #define HT7017_PROT_HYSTERESIS_W        5.0f    // W
 
-// ─── OpenBeken channel mapping ────────────────────────────────────────────────
-// All measurement channels published as (float_value × 100) integer.
-// ALARM channel is the exception — published as raw state code 0-4.
-// See AUTOEXEC CHANNEL TYPES in the header comment for setChannelType values.
-#define HT7017_CHANNEL_VOLTAGE      10   // V    ×100  → voltage_div100
-#define HT7017_CHANNEL_CURRENT      11   // A    ×100  → current_div100 (or _div1000 with scale adj)
-#define HT7017_CHANNEL_POWER        12   // W    ×100  → power_div100
-#define HT7017_CHANNEL_FREQ         13   // Hz   ×100  → ReadOnly (display ÷100)
-#define HT7017_CHANNEL_PF           14   // 0-1  ×100  → PowerFactor_div100
-#define HT7017_CHANNEL_REACTIVE     15   // VAR  ×100  → ReadOnly
-#define HT7017_CHANNEL_APPARENT     16   // VA   ×100  → ReadOnly
-#define HT7017_CHANNEL_WH           17   // Wh   ×1000 → EnergyTotal_kWh_div1000
-#define HT7017_CHANNEL_VARH         18   // VARh ×1000 → ReadOnly
-#define HT7017_CHANNEL_EMUSR        19   // bits ×100  → ReadOnly (÷100 = raw bitmask)
-#define HT7017_CHANNEL_ALARM        20   // 0-4  raw   → ReadOnly (0=OK 1=OV 2=UV 3=OC 4=OP)
+// ─── OpenBeken channel mapping ─────────────────────────────────────────────
+//
+// *** AUDIT NOTE ***
+// The channel numbers below (1-7) are the ACTUAL values used by drv_ht7017.c
+// (HT_CH_VOLTAGE=1 … HT_CH_ALARM=7).  A previous header version listed
+// channels 10-20 which were NEVER compiled into the .c file and did not match
+// the display driver (drv_st7735.c) or application driver (drv_kws303wf.c).
+// Those dead defines have been removed to prevent future integration confusion.
+//
+// ENCODING CONVENTION (all channels, except ALARM):
+//   setChannel value = (float_measurement × multiplier) cast to int
+//
+#define HT7017_CHANNEL_VOLTAGE    1   // V   × 100   e.g. 22150 = 221.50 V
+#define HT7017_CHANNEL_CURRENT    2   // A   × 1000  e.g.   550 =   0.550 A
+#define HT7017_CHANNEL_POWER      3   // W   × 10    e.g.  1217 = 121.7 W
+#define HT7017_CHANNEL_FREQ       4   // Hz  × 100   e.g.  5012 =  50.12 Hz
+#define HT7017_CHANNEL_PF         5   // PF  × 1000  e.g.   980 =   0.980
+#define HT7017_CHANNEL_WH         6   // Wh  × 10    e.g.  4700 = 470.0 Wh
+#define HT7017_CHANNEL_ALARM      7   // 0-4 raw      0=OK 1=OV 2=UV 3=OC 4=OP
+//
+// AUTOEXEC setChannelType (reference):
+//   setChannelType 1  voltage_div100          // Voltage   (V)
+//   setChannelType 2  current_div1000         // Current   (A)
+//   setChannelType 3  power_div10             // Power     (W)
+//   setChannelType 4  ReadOnly                // Frequency (÷100 = Hz)
+//   setChannelType 5  PowerFactor_div1000     // Power Factor
+//   setChannelType 6  EnergyTotal_kWh_div10000// Active energy (Wh×10, display ÷10000 = kWh)
+//   setChannelType 7  ReadOnly                // Alarm state 0-4
 
 // ─── Behaviour ────────────────────────────────────────────────────────────────
 #define HT7017_MAX_MISS_COUNT       3
