@@ -1,5 +1,6 @@
 /*
  * drv_st7735.c — ST7735S 0.96" 80×160 TFT Display Driver for OpenBK7231N
+ * Version : see KWS_FW_VERSION_STR / KWS_FW_BUILD_DATE in obk_config.h
  * Target: KWS-303WF  FPC-JL096B005-01V0
  *
  * SINGLE RESPONSIBILITY: Read OBK channels → draw pixels on screen.
@@ -829,6 +830,62 @@ static commandResult_t CMD_Scale(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
+/* ── st7735_version command ───────────────────────────────────────────────── */
+static commandResult_t CMD_Version(const void *ctx, const char *cmd,
+                                   const char *args, int flags)
+{
+    (void)ctx; (void)cmd; (void)args; (void)flags;
+    /* Redraws the splash screen on demand (useful for debugging/ID). */
+    ST7735_FillScreen(ST7735_BLACK);
+    /* Line 1: device name centred */
+    ST7735_DrawString(2,  10, "KWS-303WF",      ST7735_CYAN,   ST7735_BLACK, S2);
+    /* Line 2: firmware version */
+    ST7735_DrawString(4,  46, KWS_FW_VERSION_STR, ST7735_WHITE, ST7735_BLACK, S2);
+    /* Line 3: build date */
+    ST7735_DrawString(2,  82, KWS_FW_BUILD_DATE,  ST7735_GREY,  ST7735_BLACK, S1);
+    /* Line 4: SOC/module tag */
+    ST7735_DrawString(2, 100, "BK7231N / CBU",  ST7735_GREY,   ST7735_BLACK, S1);
+    /* Line 5: OBK tag */
+    ST7735_DrawString(2, 114, "OpenBK7231T",    ST7735_GREY,   ST7735_BLACK, S1);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "ST7735: fw=%s %s", KWS_FW_VERSION_STR, KWS_FW_BUILD_DATE);
+    return CMD_RES_OK;
+}
+
+/* ── draw_boot_splash ─────────────────────────────────────────────────────────
+ * Shown for ST7735_SPLASH_MS milliseconds immediately after hardware init,
+ * before draw_static_labels() switches to the live energy screen.
+ * Uses the same font/scale as CMD_Version so both look identical.
+ * The splash occupies the full 80×160 canvas; ST7735_FillScreen(BLACK) in
+ * ST7735_Init() has already blanked the panel before this is called.
+ * ─────────────────────────────────────────────────────────────────────────── */
+#define ST7735_SPLASH_MS  2000u   /* visible for 2 seconds */
+
+static void draw_boot_splash(void)
+{
+    /* Row layout (scale-2 glyph = 14px tall, scale-1 = 7px tall):
+     *   Y=  8  "KWS-303WF"    CYAN   scale-2
+     *   Y= 44  version string WHITE  scale-2
+     *   Y= 80  build date     GREY   scale-1
+     *   Y= 96  SOC name       GREY   scale-1
+     *   Y=112  firmware name  GREY   scale-1
+     *
+     * Total used: 112 + 7 = 119 px — centred in 160 px height.
+     * The 2-second delay is done in RunEverySecond() via a countdown counter;
+     * this function only draws — it does NOT block.
+     */
+    ST7735_DrawString(2,   8, "KWS-303WF",      ST7735_CYAN,  ST7735_BLACK, S2);
+    ST7735_DrawString(4,  44, KWS_FW_VERSION_STR, ST7735_WHITE, ST7735_BLACK, S2);
+    ST7735_DrawString(2,  80, KWS_FW_BUILD_DATE,  ST7735_GREY, ST7735_BLACK, S1);
+    ST7735_DrawString(2,  96, "BK7231N / CBU",  ST7735_GREY,  ST7735_BLACK, S1);
+    ST7735_DrawString(2, 112, "OpenBK7231T",    ST7735_GREY,  ST7735_BLACK, S1);
+}
+
+/* Counts down from ST7735_SPLASH_MS/1000 seconds in RunEverySecond().
+ * While > 0 the splash is visible; when it reaches 0 the energy screen
+ * is initialised and normal operation begins.                           */
+static uint8_t g_splash_ticks = 0;
+
 /* ══════════════════════════════════════════════════════════════════════════
  * SECTION I — OPENBK LIFECYCLE
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -857,8 +914,13 @@ void ST7735_Init(void)
     TFT_InitController();
     g_initialized = 1;
     ST7735_FillScreen(ST7735_BLACK);
-    draw_static_labels();
-    caches_clear();
+
+    /* Boot splash: shown for ST7735_SPLASH_MS before the energy screen.
+     * g_splash_ticks drives the countdown in RunEverySecond().          */
+    g_splash_ticks = (uint8_t)(ST7735_SPLASH_MS / 1000u);
+    draw_boot_splash();
+    /* draw_static_labels() and caches_clear() are called by RunEverySecond()
+     * once g_splash_ticks reaches zero — NOT here.                       */
 
     CMD_RegisterCommand("st7735_clear",      CMD_Clear,      NULL);
     CMD_RegisterCommand("st7735_brightness", CMD_Brightness, NULL);
@@ -867,14 +929,35 @@ void ST7735_Init(void)
     CMD_RegisterCommand("st7735_color",      CMD_Color,      NULL);
     CMD_RegisterCommand("st7735_draw",       CMD_Draw,       NULL);
     CMD_RegisterCommand("st7735_scale",      CMD_Scale,      NULL);
+    CMD_RegisterCommand("st7735_update",     CMD_Update,     NULL);
+    CMD_RegisterCommand("st7735_version",    CMD_Version,    NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: ready 80x160 rupee=idx95 sentinel=0x01 reads Ch1-11");
+              "ST7735: ready 80x160 fw=%s %s rupee=idx95 sentinel=0x01 reads Ch1-13",
+              KWS_FW_VERSION_STR, KWS_FW_BUILD_DATE);
 }
 
 void ST7735_RunEverySecond(void)
 {
     if (!g_initialized) return;
+
+    /* Splash countdown: while g_splash_ticks > 0 we're showing the boot
+     * splash.  On the tick where it reaches zero we wipe the screen,
+     * draw the static energy-screen labels, clear the value caches, and
+     * then fall through to display_tick() so the live data appears
+     * immediately rather than waiting another whole second.             */
+    if (g_splash_ticks > 0) {
+        g_splash_ticks--;
+        if (g_splash_ticks == 0) {
+            ST7735_FillScreen(ST7735_BLACK);
+            draw_static_labels();
+            caches_clear();
+            /* fall through to display_tick() below */
+        } else {
+            return;  /* still showing splash — don't run display_tick() */
+        }
+    }
+
     display_tick();
 }
 
