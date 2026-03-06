@@ -90,6 +90,21 @@
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
 #endif
 
+/* ── LittleFS fopen("w") quirk on BK7231N ────────────────────────────────────
+ * fopen(path,"w") returns NULL when the file does not yet exist.
+ * fopen(path,"a") creates it.  robust_fopen_w() tries "w" first; on failure
+ * it touches the file with "a" then retries "w".  See drv_ht7017.c for the
+ * full root-cause note (confirmed 2026-03-06).
+ * ──────────────────────────────────────────────────────────────────────────── */
+static FILE *robust_fopen_w(const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (f) return f;
+    f = fopen(path, "a");
+    if (f) fclose(f);
+    return fopen(path, "w");
+}
+
 /* ============================================================================
  * SECTION A — CONFIGURATION
  * ============================================================================ */
@@ -234,7 +249,7 @@ static void lifetime_load(void)
 
 static void lifetime_save(void)
 {
-    FILE *f = fopen(KWS_LIFETIME_FILE, "w");
+    FILE *f = robust_fopen_w(KWS_LIFETIME_FILE);
     if (!f) return;
     fprintf(f, "wh=%.4f\n", g_lifetime_wh);
     fclose(f);
@@ -576,7 +591,7 @@ static uint32_t  g_endTk  = 0;
 
 static void sess_save(void)
 {
-    FILE *f = fopen(KWS_SESSION_FILE, "w");
+    FILE *f = robust_fopen_w(KWS_SESSION_FILE);
     if (!f) return;
     fprintf(f, "active=%u\nvehicle=%u\nid=%u\nwh_off=%.4f\nwh_sess=%.4f\n"
                "segs=%u\npeak_w=%.2f\npeak_a=%.4f\nrate=%.4f\n"
@@ -731,7 +746,7 @@ static void sess_end(void)
     history_append();    /* improvement #4: write CSV row */
     sess_mqtt();
 
-    FILE *f = fopen(KWS_SESSION_FILE,"w");
+    FILE *f = robust_fopen_w(KWS_SESSION_FILE);
     if (f) { fprintf(f,"active=0\n"); fclose(f); }
 
     PubCh(KWS_CH_SESS_ACTIVE,  0);   /* improvement #10: clear session flag  */
@@ -769,7 +784,7 @@ static void sess_tick(void)
             sess_save();
             /* improvement #8: persist lifetime Wh snapshot every 60 s */
             float snap = g_lifetime_wh + g_ev.wh_session;
-            FILE *lf = fopen(KWS_LIFETIME_FILE, "w");
+            FILE *lf = robust_fopen_w(KWS_LIFETIME_FILE);
             if (lf) { fprintf(lf, "wh=%.4f\n", snap); fclose(lf); }
         }
     } else {
@@ -906,7 +921,7 @@ static commandResult_t CMD_HistoryDump(const void*x,const char*c,const char*a,in
 /* improvement #4: clear history file */
 static commandResult_t CMD_HistoryClear(const void*x,const char*c,const char*a,int f)
 {
-    FILE *fh = fopen(KWS_HISTORY_FILE, "w");
+    FILE *fh = robust_fopen_w(KWS_HISTORY_FILE);
     if (fh) { fclose(fh); }
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_history: cleared");
     return CMD_RES_OK;
