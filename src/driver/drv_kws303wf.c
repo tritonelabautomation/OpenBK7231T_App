@@ -365,6 +365,12 @@ static uint8_t g_ntc_fast_held = 0u;      /* ticks spent in FAST mode       */
 static uint8_t g_ntc_seeded    = 0u;      /* EMA seed flag                  */
 static uint8_t g_ntc_alarm     = 0u;      /* over-temp alarm latch          */
 static uint8_t g_ntc_in_fast   = 0u;      /* 1 = FAST mode active           */
+/* NTC ADC warmup: BK7231N ADC takes several cycles to settle after power-on.
+ * The first samples read artificially low counts → Steinhart-Hart maps them
+ * to artificially high temperatures (observed: 52°C → real 39°C in ~2s).
+ * Discard the first NTC_ADC_WARMUP_SAMPLES before seeding the EMA.         */
+#define NTC_ADC_WARMUP_SAMPLES  3u
+static uint8_t g_ntc_warmup    = NTC_ADC_WARMUP_SAMPLES;
 
 static void ntc_tick(void)
 {
@@ -388,9 +394,23 @@ static void ntc_tick(void)
         return;
     }
 
-    /* ── STEP 2: EMA filter ──────────────────────────────────────────
-     * First call: seed EMA with actual reading so we do not start from
-     * 25°C and produce a false transient on a hot system at boot.
+    /* ── STEP 2: ADC warmup discard ─────────────────────────────────────
+     * Silently discard the first NTC_ADC_WARMUP_SAMPLES readings after boot.
+     * The BK7231N ADC settles slowly — early samples read too low, which
+     * Steinhart-Hart maps to falsely high temperatures (observed ~52°C spike
+     * decaying to real value in ~2 s). Log the discarded reading so the
+     * behaviour is visible in the console without triggering any alarm path. */
+    if (g_ntc_warmup > 0u) {
+        g_ntc_warmup--;
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: NTC warmup discard %.1fC (%u left)",
+                  t_raw, (unsigned)g_ntc_warmup);
+        return;
+    }
+
+    /* ── STEP 3: EMA filter ──────────────────────────────────────────
+     * First call after warmup: seed EMA with actual reading so we do not
+     * start from 25°C and produce a false transient on a hot system.
      * Subsequent calls: y += (x - y) / N  (α=1/N, N=NTC_EMA_N=4).     */
     g_ntc_ema_prev = g_ntc_ema;
     if (!g_ntc_seeded) {
@@ -1007,6 +1027,7 @@ void KWS303WF_Init(void)
     g_ntc_last_pub  = -999.0f; /* force publish on first valid reading */
     g_ntc_ema       = 25.0f;   /* nominal; overwritten on first real sample */
     g_ntc_ema_prev  = 25.0f;
+    g_ntc_warmup    = NTC_ADC_WARMUP_SAMPLES; /* discard first N ADC reads  */
 
     btn_register(KWS_BTN_TOGGLE,   on_toggle);
     btn_register(KWS_BTN_SESSION,  on_session);
