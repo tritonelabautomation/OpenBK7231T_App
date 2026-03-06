@@ -264,10 +264,14 @@ static void Protection(void)
     } else {
         bool clr=false;
         switch(g_alarm){
-            case 1:clr=g_ovThr>0&&g_voltage<g_ovThr-HT7017_PROT_HYSTERESIS_V;break;
-            case 2:clr=g_uvThr>0&&g_voltage>g_uvThr+HT7017_PROT_HYSTERESIS_V;break;
-            case 3:clr=g_ocThr>0&&g_current<g_ocThr-HT7017_PROT_HYSTERESIS_A;break;
-            case 4:clr=g_opThr>0&&g_power<g_opThr-HT7017_PROT_HYSTERESIS_W;  break;
+            /* BUG-12 FIX: threshold disabled (==0) while tripped must auto-clear.
+             * Previously g_xThr>0 && ... means if threshold set to 0 after a trip,
+             * clr stays false permanently → relay locked open forever.
+             * Fix: (g_xThr==0) short-circuits: disabled = always clear. */
+            case 1:clr=(g_ovThr==0)||(g_voltage<g_ovThr-HT7017_PROT_HYSTERESIS_V);break;
+            case 2:clr=(g_uvThr==0)||(g_voltage>g_uvThr+HT7017_PROT_HYSTERESIS_V);break;
+            case 3:clr=(g_ocThr==0)||(g_current<g_ocThr-HT7017_PROT_HYSTERESIS_A);break;
+            case 4:clr=(g_opThr==0)||(g_power  <g_opThr-HT7017_PROT_HYSTERESIS_W);break;
             default:clr=true;
         }
         if (clr && (g_tick-g_tripAt)>=(uint32_t)HT7017_PROT_RECOVER_SECONDS) {
@@ -573,11 +577,32 @@ void HT7017_RunEverySecond(void)
         ProcessFrame(d2,d1,d0,cs, g_wasFast ? &g_fast[g_fi] : &g_slow[g_si]);
     } else {
         g_miss++;
+        /* WARN-2 FIX: the miss-skip advance and the normal bottom advance
+         * previously both ran on the miss-threshold tick, double-advancing
+         * fi/si and skipping one register entirely.  Use skip_adv to suppress
+         * the normal advance when a miss-skip fires; the miss-skip already
+         * moved to the next register and sends its request directly. */
+        uint8_t skip_adv = 0;
         if (g_txCount>0) {
-            if (g_wasFast){if(++g_fmiss>=HT7017_MAX_MISS_COUNT){g_fi=(g_fi+1)%FAST_N;g_fmiss=0;}}
-            else           {if(++g_smiss>=HT7017_MAX_MISS_COUNT){g_si=(g_si+1)%SLOW_N;g_smiss=0;}}
+            if (g_wasFast) {
+                if (++g_fmiss >= HT7017_MAX_MISS_COUNT) {
+                    g_fi = (g_fi+1)%FAST_N; g_fmiss = 0; skip_adv = 1;
+                }
+            } else {
+                if (++g_smiss >= HT7017_MAX_MISS_COUNT) {
+                    g_si = (g_si+1)%SLOW_N; g_smiss = 0; skip_adv = 1;
+                }
+            }
         }
         UART_ConsumeBytes(UART_GetDataSize());
+        if (skip_adv) {
+            g_tick++;
+            /* Send request for the newly-skipped-to register without a
+             * second advance.  g_wasFast direction unchanged. */
+            if (g_wasFast) SendReq(g_fast[g_fi].reg);
+            else           SendReq(g_slow[g_si].reg);
+            return;
+        }
     }
     g_tick++;
     if (g_tick%HT7017_FAST_RATIO==0) {
