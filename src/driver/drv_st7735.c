@@ -913,7 +913,10 @@ void ST7735_Init(void)
     TFT_HardReset();
     TFT_InitController();
     g_initialized = 1;
+    /* Fill black BEFORE enabling backlight — prevents the white-RAM flash
+     * that occurs because DISPON activates the panel with undefined RAM.  */
     ST7735_FillScreen(ST7735_BLACK);
+    SPI_BLK_H();   /* backlight ON only after the black fill is complete   */
 
     /* Boot splash: shown for ST7735_SPLASH_MS before the energy screen.
      * g_splash_ticks drives the countdown in RunEverySecond().          */
