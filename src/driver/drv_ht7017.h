@@ -11,7 +11,7 @@
  * ║  ARCH    : BK7231N → UART1 (4800 8E1) → HT7017 direct  (no MCU between)  ║
  * ║  SENSING : Metal shunt strip ~0.5–1mΩ  (not current transformer)          ║
  * ║                                                                            ║
- * ║  WIRING  : BK7231N P0(RX1) ←── HT7017 TX                                 ║
+ * ║  WIRING  : BK7231N P0(RX1) ←─[Diode]─ HT7017 TX                                 ║
  * ║            BK7231N P1(TX1) ──[Diode]──► HT7017 RX                        ║
  * ║                                                                            ║
  * ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -242,8 +242,12 @@
 #define HT7017_DEFAULT_RELAY_CHANNEL    1
 
 // ─── Public API ───────────────────────────────────────────────────────────────
+/* BUG-13 FIX: Removed declarations for functions not implemented in drv_ht7017.c.
+ * Declaring unimplemented functions (RunQuick, GetApparentPower, GetGoodFrames,
+ * GetBadFrames, GetTxCount, GetMissCount, GetReactivePower, GetApparentS1,
+ * GetVARh, GetEmusr) causes linker errors if any module includes this header
+ * and calls them. Only actually-defined functions are declared here. */
 void     HT7017_Init(void);
-void     HT7017_RunQuick(void);
 void     HT7017_RunEverySecond(void);
 
 float    HT7017_GetVoltage(void);
@@ -251,16 +255,7 @@ float    HT7017_GetCurrent(void);
 float    HT7017_GetPower(void);
 float    HT7017_GetFrequency(void);
 float    HT7017_GetPowerFactor(void);
-float    HT7017_GetApparentPower(void);
-uint32_t HT7017_GetGoodFrames(void);
-uint32_t HT7017_GetBadFrames(void);
-uint32_t HT7017_GetTxCount(void);
-uint32_t HT7017_GetMissCount(void);
-float    HT7017_GetReactivePower(void);
-float    HT7017_GetApparentS1(void);
 float    HT7017_GetWh(void);
-float    HT7017_GetVARh(void);
-uint32_t HT7017_GetEmusr(void);
 uint8_t  HT7017_GetAlarmState(void);   // 0=OK 1=OV 2=UV 3=OC 4=OP
 
 #endif // __DRV_HT7017_H__
