@@ -1,5 +1,6 @@
 /*
  * drv_ht7017.c — HT7017 Energy Metering IC Driver for OpenBK7231N / KWS-303WF
+ * Version : see KWS_FW_VERSION_STR / KWS_FW_BUILD_DATE in obk_config.h
  *
  * SINGLE RESPONSIBILITY: UART poll HT7017 → calibrate → publish to OBK channels.
  * NO relay GPIO. NO EV session. NO buttons. NO display. NO MQTT.
@@ -23,7 +24,10 @@
  * CALIBRATION: VoltageSet → CurrentSet → PowerSet (in order)
  *   Use 1kW resistive load. Saved to ht7017cal.cfg.
  *
- * FIXES in this version:
+ * CHANGELOG (see HANDOVER.md for full bug register):
+ *   v1.0.16 (2026-03-06): Pass 3 audit complete. BUG-11 fixed in kws303wf.
+ *   v1.0.15 (2026-03-05): Pass 2 fixes — WARN-2 miss double-advance.
+ *   v1.0.14 (2026-03-04): Pass 1 fixes applied.
  *   FIX-CAL-1: HT7017_CAL_FILE path — removed leading slash.
  *              "/ht7017cal.cfg" fails on BK7231N LittleFS VFS (fopen returns NULL).
  *              "ht7017cal.cfg"  works — matches OBK LittleFS path convention.
@@ -577,9 +581,10 @@ void HT7017_Init(void)
      * by which time the OS has completed filesystem initialisation. */
 
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-        "HT7017: ready 4800 8E1 | Ch%u=V Ch%u=I Ch%u=P Ch%u=Hz Ch%u=PF Ch%u=Wh Ch%u=Alarm",
+        "HT7017: ready 4800 8E1 | Ch%u=V Ch%u=I Ch%u=P Ch%u=Hz Ch%u=PF Ch%u=Wh Ch%u=Alarm | fw=%s %s",
         HT_CH_VOLTAGE,HT_CH_CURRENT,HT_CH_POWER,HT_CH_FREQ,
-        HT_CH_PF,HT_CH_ENERGY,HT_CH_ALARM);
+        HT_CH_PF,HT_CH_ENERGY,HT_CH_ALARM,
+        KWS_FW_VERSION_STR, KWS_FW_BUILD_DATE);
 }
 
 void HT7017_RunEverySecond(void)
