@@ -913,10 +913,12 @@ void ST7735_Init(void)
     TFT_HardReset();
     TFT_InitController();
     g_initialized = 1;
-    /* Fill black BEFORE enabling backlight — prevents the white-RAM flash
-     * that occurs because DISPON activates the panel with undefined RAM.  */
     ST7735_FillScreen(ST7735_BLACK);
-    SPI_BLK_H();   /* backlight ON only after the black fill is complete   */
+    /* NOTE: Backlight (BLK/P24) is NOT driven HIGH here. It is left LOW
+     * from the SPI_BLK_L() call above and enabled externally (autoexec
+     * st7735_brightness command or OBK pin binding). Driving it from Init
+     * caused a dead display on KWS-303WF hardware — do not add SPI_BLK_H()
+     * here.                                                                */
 
     /* Boot splash: shown for ST7735_SPLASH_MS before the energy screen.
      * g_splash_ticks drives the countdown in RunEverySecond().          */
