@@ -128,8 +128,9 @@
 #define DISP_CH_WIFI     11
 #define DISP_CH_SESS_ACTIVE  12   /* improvement #1/#10: 1=session charging   */
 #define DISP_CH_SESS_ELAPSED 13   /* improvement #1: elapsed seconds from kws */
-#define DISP_CH_SESS_ACT 12   /* 0=idle 1=active — written by drv_kws303wf */
-#define DISP_CH_SESS_ELP 13   /* session elapsed seconds — written by drv_kws303wf */
+/* NOTE: DISP_CH_SESS_ACT and DISP_CH_SESS_ELP removed — they were duplicate
+ * defines of DISP_CH_SESS_ACTIVE (12) and DISP_CH_SESS_ELAPSED (13) above.
+ * Using the _ACTIVE/_ELAPSED names exclusively to avoid shadowing confusion. */
 
 /* Rupee sentinel: ASCII SOH (0x01), never used by OBK console or MQTT.
  * Intercepted in DrawChar() → mapped to custom ₹ glyph at font index 95. */
@@ -614,7 +615,10 @@ static void display_tick(void)
     float w    = (float)CHANNEL_Get(DISP_CH_POWER)   / 10.0f;
     float hz   = (float)CHANNEL_Get(DISP_CH_FREQ)    / 100.0f;
     float pf   = (float)CHANNEL_Get(DISP_CH_PF)      / 1000.0f;
-    float kwh  = (float)CHANNEL_Get(DISP_CH_ENERGY)  / 1000.0f;
+    /* Ch6 = Wh × 10 (from drv_ht7017.c ch_scale=10.0f).
+     * To display kWh: kWh = (Ch6 / 10) / 1000 = Ch6 / 10000.
+     * BUG-FIX: was /1000.0f → displayed 10× too high (e.g. 4.700 kWh for 0.470 kWh). */
+    float kwh  = (float)CHANNEL_Get(DISP_CH_ENERGY)  / 10000.0f;
     float tc   = (float)CHANNEL_Get(DISP_CH_TEMP)    / 100.0f;
     float cost = (float)CHANNEL_Get(DISP_CH_EVCOST)  / 100.0f;
     int   rly  = CHANNEL_Get(DISP_CH_RELAY);
