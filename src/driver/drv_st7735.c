@@ -929,7 +929,6 @@ void ST7735_Init(void)
     CMD_RegisterCommand("st7735_color",      CMD_Color,      NULL);
     CMD_RegisterCommand("st7735_draw",       CMD_Draw,       NULL);
     CMD_RegisterCommand("st7735_scale",      CMD_Scale,      NULL);
-    CMD_RegisterCommand("st7735_update",     CMD_Update,     NULL);
     CMD_RegisterCommand("st7735_version",    CMD_Version,    NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
