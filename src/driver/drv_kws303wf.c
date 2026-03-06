@@ -213,9 +213,20 @@ static void lifetime_load(void)
 {
     FILE *f = fopen(KWS_LIFETIME_FILE, "r");
     if (!f) return;
-    fscanf(f, "wh=%f\n", &g_lifetime_wh);
+    float tmp = 0.0f;
+    int n = fscanf(f, "wh=%f\n", &tmp);
     fclose(f);
-    if (g_lifetime_wh < 0.0f) g_lifetime_wh = 0.0f;
+    /* BUG-8/9 FIX: check fscanf return and reject NaN/Inf/negative.
+     * A corrupt file (e.g. power cut mid-write) could produce NaN which
+     * silently propagates through all subsequent arithmetic.
+     * !(tmp >= 0.0f) catches NaN (NaN comparisons always false) and negative. */
+    if (n != 1 || !(tmp >= 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: lifetime file invalid (n=%d val=%f) — reset to 0", n, tmp);
+        g_lifetime_wh = 0.0f;
+        return;
+    }
+    g_lifetime_wh = tmp;
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "KWS303WF: lifetime loaded %.2f Wh (%.4f kWh)",
               g_lifetime_wh, g_lifetime_wh / 1000.0f);
@@ -553,6 +564,9 @@ typedef struct {
 static EvSess_t  g_ev;
 static float     g_rate_rs = KWS_EV_RATE_DEFAULT;
 static bool      g_auto_en = true;
+/* BUG-10 FIX: preferred vehicle for next auto-detect session.
+ * Set by [-] button when idle. KWS_VEH_NONE(0) = use watt-threshold logic. */
+static uint8_t   g_preferred_veh = KWS_VEH_NONE;
 
 typedef enum { AD_IDLE, AD_DETECTING, AD_CHARGING } AdState_t;
 static AdState_t g_ad     = AD_IDLE;
@@ -580,14 +594,28 @@ static bool sess_load(void)
     FILE *f = fopen(KWS_SESSION_FILE, "r");
     if (!f) return false;
     memset(&g_ev, 0, sizeof(g_ev));
-    fscanf(f, "active=%u\nvehicle=%u\nid=%u\nwh_off=%f\nwh_sess=%f\n"
-              "segs=%u\npeak_w=%f\npeak_a=%f\nrate=%f\n"
-              "start_up=%u\n",
-           &ua, &uv, &g_ev.session_id,
-           &g_ev.wh_offset, &g_ev.wh_session, &g_ev.seg_count,
-           &g_ev.peak_w, &g_ev.peak_a, &g_ev.rate_rs,
-           &ustart);
+    /* BUG-7 FIX: check fscanf return count.
+     * A power cut mid-write leaves a truncated file. Partial reads leave
+     * zeros for missing fields — e.g. active=1 with zeroed wh_offset causes
+     * a phantom session resume with wrong vehicle/energy accounting.
+     * Accept 9 fields for backward compat (start_up was added later). */
+    int n = fscanf(f, "active=%u\nvehicle=%u\nid=%u\nwh_off=%f\nwh_sess=%f\n"
+                      "segs=%u\npeak_w=%f\npeak_a=%f\nrate=%f\n"
+                      "start_up=%u\n",
+                   &ua, &uv, &g_ev.session_id,
+                   &g_ev.wh_offset, &g_ev.wh_session, &g_ev.seg_count,
+                   &g_ev.peak_w, &g_ev.peak_a, &g_ev.rate_rs,
+                   &ustart);
     fclose(f);
+    if (n < 9) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: sess_load corrupt (n=%d) — discarding", n);
+        memset(&g_ev, 0, sizeof(g_ev));
+        return false;
+    }
+    /* Clamp vehicle to known values to avoid vehicle=0 (KWS_VEH_NONE) from
+     * a corrupt file causing wrong stats in sess_summary(). */
+    if (uv < KWS_VEH_2W || uv > KWS_VEH_4W) uv = KWS_VEH_2W;
     g_ev.active          = (uint8_t)ua;
     g_ev.vehicle         = (uint8_t)uv;
     g_ev.start_uptime_s  = (uint32_t)ustart;  /* 0 if old file without field */
@@ -618,6 +646,8 @@ static void sess_start(uint8_t veh)
 
 static char             g_mqtt_pending_pl[320] = {0};
 static volatile uint8_t g_mqtt_pending          = 0;
+static uint8_t          g_mqtt_attempts         = 0;   /* WARN-1 FIX: cap retries */
+#define KWS_MQTT_MAX_ATTEMPTS  3   /* abandon after 3 WiFi-up attempts */
 
 static void sess_mqtt(void)
 {
@@ -637,7 +667,8 @@ static void sess_mqtt(void)
              kwh, cost, km, saved, g_ev.seg_count,
              g_ev.peak_w, g_ev.peak_a,
              (unsigned)g_ev.duration_s, (unsigned)g_uptime_s);
-    g_mqtt_pending = 1;
+    g_mqtt_pending  = 1;
+    g_mqtt_attempts = 0;   /* reset for new message */
 }
 
 static void sess_summary(void)
@@ -755,8 +786,19 @@ static void sess_tick(void)
         g_adWsum += w;
         if (++g_adTick >= KWS_DETECT_S) {
             float avg = g_adWsum / (float)g_adTick;
-            if (!g_ev.active)
-                sess_start((avg < KWS_SPLIT_W) ? KWS_VEH_2W : KWS_VEH_4W);
+            if (!g_ev.active) {
+                /* BUG-10 FIX: use [-] button override if the user pre-selected
+                 * a vehicle while idle; otherwise fall back to watt threshold.
+                 * BUG-11 FIX: original BUG-10 patch placed a variable declaration
+                 * as the bare body of an if statement.  In C, a declaration is not
+                 * a statement; this is a compile error on C89 and a logic error on
+                 * C99 (sess_start would execute unconditionally regardless of the
+                 * g_ev.active guard).  Wrapped in braces to fix both issues. */
+                uint8_t veh = (g_preferred_veh != KWS_VEH_NONE)
+                              ? g_preferred_veh
+                              : ((avg < KWS_SPLIT_W) ? KWS_VEH_2W : KWS_VEH_4W);
+                sess_start(veh);
+            }
             g_ad=AD_CHARGING; g_endTk=0;
         }
         break;
@@ -773,7 +815,11 @@ static void sess_tick(void)
 static void on_toggle(void)   { if (g_relay_closed) relay_open(); else relay_close(); }
 static void on_session(void)
 {
-    uint8_t veh = g_ev.active ? g_ev.vehicle : KWS_VEH_2W;
+    /* BUG-10 FIX: when idle, use g_preferred_veh if the user pre-selected
+     * one with [-]; otherwise default to 2W. */
+    uint8_t veh = g_ev.active  ? g_ev.vehicle
+                : (g_preferred_veh != KWS_VEH_NONE) ? g_preferred_veh
+                : KWS_VEH_2W;
     if (g_ev.active) sess_end();
     sess_start(veh);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: Session reset by [+] button");
@@ -781,7 +827,9 @@ static void on_session(void)
 /* improvement #3 — [-] (P20) cycles vehicle profile.
  * Active session: ends current session and immediately restarts with the
  *   other vehicle type — history row is written for the partial session.
- * Idle: toggles the preferred vehicle so the next auto-detect uses it.    */
+ * Idle: toggles g_preferred_veh so the next auto-detect session uses it.
+ *       BUG-10 FIX: was a dead local static — now file-scope so auto-detect
+ *       and on_session() can actually read it.                              */
 static void on_reserved(void)
 {
     if (g_ev.active) {
@@ -793,11 +841,10 @@ static void on_reserved(void)
         sess_end();
         sess_start(new_veh);
     } else {
-        static uint8_t s_next_veh = KWS_VEH_2W;
-        s_next_veh = (s_next_veh == KWS_VEH_2W) ? KWS_VEH_4W : KWS_VEH_2W;
+        g_preferred_veh = (g_preferred_veh == KWS_VEH_2W) ? KWS_VEH_4W : KWS_VEH_2W;
         addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
                   "KWS303WF: [-] next session vehicle = %s",
-                  (s_next_veh==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME);
+                  (g_preferred_veh==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME);
     }
 }
 
@@ -997,18 +1044,29 @@ void KWS303WF_RunEverySecond(void)
     g_uptime_s++;
 
     if (g_mqtt_pending) {
-        /* improvement #9: only attempt publish when WiFi is up.
-         * Flag stays set if WiFi is down — retried on next tick when connected.
-         * Prevents blocking RunEverySecond() for 4-20 s on TCP connect timeout. */
+        /* WARN-1 FIX: two-part guard.
+         * (a) WiFi down: defer until connected. Flag stays set.
+         * (b) WiFi up but broker unreachable: publishMQTT may block up to
+         *     TCP timeout (~20 s) → WDT fires. Cap at KWS_MQTT_MAX_ATTEMPTS
+         *     so a permanently-unreachable broker does not cause repeated WDT
+         *     reboots. Flag cleared AFTER the call (not before) so a WDT
+         *     reboot (static zero-init) is safe — message is lost but no loop. */
         if (ReadCh(KWS_CH_WIFI) == 0) {
             addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
                       "KWS303WF: MQTT publish deferred — WiFi down");
+        } else if (g_mqtt_attempts >= KWS_MQTT_MAX_ATTEMPTS) {
+            g_mqtt_pending  = 0;
+            g_mqtt_attempts = 0;
+            addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+                      "KWS303WF: MQTT abandoned after %u attempts — broker unreachable?",
+                      (unsigned)KWS_MQTT_MAX_ATTEMPTS);
         } else {
             char cmd[400];
             snprintf(cmd, sizeof(cmd), "publishMQTT %s %s",
                      KWS_MQTT_TOPIC, g_mqtt_pending_pl);
-            g_mqtt_pending = 0;
-            CMD_ExecuteCommand(cmd, 0);
+            g_mqtt_attempts++;
+            CMD_ExecuteCommand(cmd, 0);  /* may block if broker unreachable  */
+            g_mqtt_pending = 0;          /* clear after: safe on WDT reboot  */
         }
     }
 
