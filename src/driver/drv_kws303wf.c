@@ -1,5 +1,6 @@
 /*
  * drv_kws303wf.c — KWS-303WF Device Application Driver for OpenBK7231N
+ * Version : see KWS_FW_VERSION_STR / KWS_FW_BUILD_DATE in obk_config.h
  *
  * SINGLE RESPONSIBILITY: Device-specific hardware & EV session application.
  * Owns: latching relay GPIO (P7/P8), buttons (P28/P26/P20), NTC temp (ADC3),
@@ -1041,7 +1042,8 @@ void KWS303WF_Init(void)
     CMD_RegisterCommand("kws_ntc_alarm_reset",  CMD_NtcAlarmReset,NULL);
 
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "KWS303WF: ready relay=P%d/P%d ntc=ADC%d slow=%us fast=%us rate=Rs%.2f/kWh",
+              "KWS303WF: ready fw=%s %s relay=P%d/P%d ntc=ADC%d slow=%us fast=%us rate=Rs%.2f/kWh",
+              KWS_FW_VERSION_STR, KWS_FW_BUILD_DATE,
               KWS_RELAY_PIN_ON, KWS_RELAY_PIN_OFF, KWS_ADC_CH,
               (unsigned)NTC_SLOW_PERIOD, (unsigned)NTC_FAST_PERIOD, g_rate_rs);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
