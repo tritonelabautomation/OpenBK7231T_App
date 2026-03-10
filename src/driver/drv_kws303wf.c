@@ -1007,6 +1007,27 @@ static commandResult_t CMD_Lifetime(const void*x,const char*c,const char*a,int f
 /* ============================================================================
  * SECTION I — OPENBK LIFECYCLE
  * ============================================================================ */
+
+/* Device short-name set via kws_ha_devname command.
+ * Must match the OBK MQTT client ID / Short Name (shown in web UI header,
+ * e.g. "obkAB12CD").  Placed here — before KWS303WF_Init — so the compiler
+ * sees the definition before CMD_RegisterCommand references it. */
+static char g_ha_devname[40] = "";
+
+static commandResult_t CMD_HaDevname(const void *ctx, const char *cmd,
+                                     const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: kws_ha_devname = \"%s\"", g_ha_devname);
+        return CMD_RES_OK;
+    }
+    snprintf(g_ha_devname, sizeof(g_ha_devname), "%s", args);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: HA devname set to \"%s\"", g_ha_devname);
+    return CMD_RES_OK;
+}
+
 void KWS303WF_Init(void)
 {
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "KWS303WF: init");
@@ -1170,24 +1191,6 @@ void KWS303WF_RunQuickTick(void)
  *   binary_sensor: Ch7 alarm, Ch12 session_active
  *   switch       : Ch8 relay
  * ============================================================================ */
-
-/* Device short-name set via kws_ha_devname command.
- * Must match the OBK MQTT client ID / Short Name. */
-static char g_ha_devname[40] = "";
-
-static commandResult_t CMD_HaDevname(const void *ctx, const char *cmd,
-                                     const char *args, int flags)
-{
-    if (!args || !*args) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: kws_ha_devname = \"%s\"", g_ha_devname);
-        return CMD_RES_OK;
-    }
-    snprintf(g_ha_devname, sizeof(g_ha_devname), "%s", args);
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: HA devname set to \"%s\"", g_ha_devname);
-    return CMD_RES_OK;
-}
 
 /* Publish one HA MQTT discovery config via raw topic (3rd arg '1'). */
 static void ha_pub(const char *ha_pfx, const char *component,
