@@ -13,6 +13,8 @@
 
 void KWS303WF_Init(void);
 void KWS303WF_RunEverySecond(void);
+void KWS303WF_RunQuickTick(void);
+void KWS303WF_OnHassDiscovery(const char *topic);
 
 #endif /* ENABLE_DRIVER_KWS303WF */
 #endif /* DRV_KWS303WF_H */
