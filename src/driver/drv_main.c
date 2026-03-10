@@ -541,10 +541,10 @@ static driver_t g_drivers[] = {
 	KWS303WF_Init,                           // Init
 	KWS303WF_RunEverySecond,                 // onEverySecond
 	NULL,                                    // appendInformationToHTTPIndexPage
-	NULL,                                    // runQuickTick
+	KWS303WF_RunQuickTick,                   // runQuickTick
 	NULL,                                    // stopFunction
 	NULL,                                    // onChannelChanged
-	NULL,                                    // onHassDiscovery
+	KWS303WF_OnHassDiscovery,               // onHassDiscovery
 	false,                                   // loaded
 	},
 #endif                             
