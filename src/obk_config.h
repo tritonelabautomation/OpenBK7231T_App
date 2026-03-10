@@ -17,8 +17,8 @@
 #define KWS_FW_VERSION_MAJOR  1
 #define KWS_FW_VERSION_MINOR  0
 #define KWS_FW_VERSION_PATCH  16
-#define KWS_FW_VERSION_STR    "v1.0.16"
-#define KWS_FW_BUILD_DATE     "2026-03-06"
+#define KWS_FW_VERSION_STR    "v1.0.18"
+#define KWS_FW_BUILD_DATE     "2026-03-10"
 
 #define OBK_VARIANT_DEFAULT						0
 #define OBK_VARIANT_BERRY						1
