@@ -132,16 +132,15 @@
 // ─── Public API ────────────────────────────────────────────────────────────────
 void ST7735_Init(void);
 void ST7735_RunEverySecond(void);
-void ST7735_AppendInformationToHTTPIndexPage(http_request_t *request);
+/* NOTE: AppendInformationToHTTPIndexPage is NOT implemented — drv_main.c
+ * passes NULL for that slot.  Declaration removed (BUG-14).              */
 
 void ST7735_FillScreen(uint16_t colour);
 void ST7735_FillRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t colour);
 void ST7735_DrawChar(uint8_t x, uint8_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale);
 void ST7735_DrawString(uint8_t x, uint8_t y, const char *str, uint16_t fg, uint16_t bg, uint8_t scale);
-
-// Flicker-free energy screen — only changed zones are redrawn
-void ST7735_DrawEnergyScreen(float v, float a, float w,
-                              float kwh, float pf, float hz,
-                              float temp_c, uint8_t relay_on);
+/* NOTE: ST7735_DrawEnergyScreen() was removed in the channel-read refactor.
+ * display_tick() reads channels directly — no external caller needed.
+ * Declaration removed (BUG-14).                                           */
 
 #endif // __DRV_ST7735_H__
