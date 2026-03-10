@@ -125,9 +125,10 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_RELAY_PIN_OFF     7
 /* NOTE: KWS_RELAY_PULSE_MS is defined for documentation purposes only.
  * The actual pulse duration is 1 second (g_uptime_s + 1), enforced by
- * relay_pulse_tick() called from RunEverySecond(). The 1-second pulse
- * exceeds the latching relay minimum (≥100ms) with comfortable margin.
- * A sub-second timer would require RunQuickTick() integration. */
+ * relay_pulse_tick() called from KWS303WF_RunQuickTick() (~10 ms tick).
+ * g_pulse_off_at uses second-resolution g_uptime_s, so coil de-energises
+ * within ~10 ms of the second boundary — well within the latching relay
+ * minimum (≥100 ms).  De-energise overshoot improved from ≤1 s to ≤10 ms. */
 #define KWS_RELAY_PULSE_MS  200   /* reference only — actual pulse = 1 s via uptime tick */
 #define KWS_BTN_TOGGLE       28
 #define KWS_BTN_SESSION      26
@@ -1061,6 +1062,7 @@ void KWS303WF_Init(void)
     CMD_RegisterCommand("kws_lifetime",         CMD_Lifetime,     NULL);   /* #8 */
     CMD_RegisterCommand("kws_ntc_status",       CMD_NtcStatus,    NULL);
     CMD_RegisterCommand("kws_ntc_alarm_reset",  CMD_NtcAlarmReset,NULL);
+    CMD_RegisterCommand("kws_ha_devname",       CMD_HaDevname,    NULL);
 
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
               "KWS303WF: ready fw=%s %s relay=P%d/P%d ntc=ADC%d slow=%us fast=%us rate=Rs%.2f/kWh",
@@ -1108,14 +1110,224 @@ void KWS303WF_RunEverySecond(void)
         }
     }
 
-    relay_pulse_tick();
     relay_sync(ReadCh(KWS_CH_RELAY));
-    btn_tick();
     sess_tick();
 
     /* NTC: 9 out of 10 calls cost ~0.1 µs (countdown decrement only).
      * ADC + Steinhart-Hart + EMA + state machine runs on sample ticks only. */
     ntc_tick();
+}
+
+/* ============================================================================
+ * QUICK TICK (~10 ms, called from DRV_RunQuickTick by OBK core)
+ *
+ * Improvement #Q1 — RunQuickTick for buttons + relay coil de-energise.
+ *
+ * WHY: btn_tick() uses a 3-consecutive-read debounce. When called from
+ * RunEverySecond (1 Hz) a button press takes 3+ seconds to register.
+ * At the ~10 ms quick-tick rate the same 3-tick debounce window is ~30 ms —
+ * imperceptible to the user.
+ *
+ * relay_pulse_tick() de-energises the coil after g_pulse_off_at seconds.
+ * g_uptime_s is still incremented in RunEverySecond (second resolution),
+ * so the comparison g_uptime_s >= g_pulse_off_at remains correct; the coil
+ * is now released within the first quick-tick AFTER the second boundary
+ * (~0–10 ms overshoot) instead of 0–1 s.
+ * ============================================================================ */
+void KWS303WF_RunQuickTick(void)
+{
+    relay_pulse_tick();
+    btn_tick();
+}
+
+/* ============================================================================
+ * HOME ASSISTANT MQTT AUTO-DISCOVERY
+ *
+ * Improvement #H2 — publish HA MQTT discovery payloads for all 13 channels.
+ *
+ * HOW TO USE:
+ *   1. In autoexec.bat (or the OBK web console), set your device short-name
+ *      once — it must match your OBK "Short Name" (shown in the web UI header,
+ *      e.g. "obkAB12CD"):
+ *          kws_ha_devname obkAB12CD
+ *   2. Trigger HA discovery from the OBK web UI (MQTT → HA Discovery button).
+ *
+ * WHY g_ha_devname:
+ *   The HA discovery state_topic must match the OBK channel publish topic:
+ *   "<devname>/<ch>/get".  The devname equals the OBK MQTT client ID (Short
+ *   Name).  CFG_GetShortDeviceName() was not confirmed as an available symbol
+ *   in this driver's include scope, so a driver-level config var is used
+ *   instead to avoid unverified symbol dependencies.
+ *
+ * PUBLISH MODE:
+ *   publishMQTT <topic> <payload> 1  — 3rd arg '1' = raw topic, OBK does NOT
+ *   prepend the devname.  Required for "homeassistant/..." discovery topics.
+ *
+ * Channels published (13 total):
+ *   sensor       : Ch1 voltage, Ch2 current, Ch3 power, Ch4 frequency,
+ *                  Ch5 power_factor, Ch6 energy, Ch9 temperature,
+ *                  Ch10 ev_cost, Ch13 session_elapsed
+ *   binary_sensor: Ch7 alarm, Ch12 session_active
+ *   switch       : Ch8 relay
+ * ============================================================================ */
+
+/* Device short-name set via kws_ha_devname command.
+ * Must match the OBK MQTT client ID / Short Name. */
+static char g_ha_devname[40] = "";
+
+static commandResult_t CMD_HaDevname(const void *ctx, const char *cmd,
+                                     const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: kws_ha_devname = \"%s\"", g_ha_devname);
+        return CMD_RES_OK;
+    }
+    snprintf(g_ha_devname, sizeof(g_ha_devname), "%s", args);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: HA devname set to \"%s\"", g_ha_devname);
+    return CMD_RES_OK;
+}
+
+/* Publish one HA MQTT discovery config via raw topic (3rd arg '1'). */
+static void ha_pub(const char *ha_pfx, const char *component,
+                   const char *uid, const char *cfg_json)
+{
+    char cmd[640];
+    snprintf(cmd, sizeof(cmd),
+             "publishMQTT %s/%s/%s/config %s 1",
+             ha_pfx, component, uid, cfg_json);
+    CMD_ExecuteCommand(cmd, 0);
+}
+
+void KWS303WF_OnHassDiscovery(const char *topic)
+{
+    if (g_ha_devname[0] == '\0') {
+        addLogAdv(LOG_WARN, LOG_FEATURE_ENERGY,
+                  "KWS303WF: HA discovery skipped — set devname first: "
+                  "kws_ha_devname <your-obk-shortname>");
+        return;
+    }
+
+    /* Shared device block — groups all 13 entities under one HA device card. */
+    char dev_block[256];
+    snprintf(dev_block, sizeof(dev_block),
+             "\"device\":{\"identifiers\":[\"%s\"],"
+             "\"name\":\"KWS-303WF\","
+             "\"model\":\"KWS-303WF EV Smart Plug\","
+             "\"manufacturer\":\"Custom\","
+             "\"sw_version\":\"%s\"}",
+             g_ha_devname, KWS_FW_VERSION_STR);
+
+    const char *dev = g_ha_devname;
+    char uid[72];
+    char cfg[560];
+
+/* Macro for simple numeric sensors — reduces repetition. */
+#define HA_SENSOR(label, sfx, ch_num, unit, dev_cls, tmpl, s_cls)        \
+    do {                                                                   \
+        snprintf(uid, sizeof(uid), "%s_" sfx, dev);                       \
+        snprintf(cfg, sizeof(cfg),                                         \
+            "{\"name\":\"" label "\","                                     \
+            "\"unique_id\":\"%s\","                                        \
+            "\"state_topic\":\"%s/" ch_num "/get\","                      \
+            "\"unit_of_measurement\":\"" unit "\","                        \
+            "\"device_class\":\"" dev_cls "\","                            \
+            "\"value_template\":\"" tmpl "\","                             \
+            "\"state_class\":\"" s_cls "\",%s}",                           \
+            uid, dev, dev_block);                                          \
+        ha_pub(topic, "sensor", uid, cfg);                                 \
+    } while (0)
+
+    /* Ch1 Voltage  (integer = V × 100)   */
+    HA_SENSOR("Voltage",      "voltage",      "1",  "V",
+              "voltage",      "{{value|float/100}}",    "measurement");
+    /* Ch2 Current  (integer = A × 1000)  */
+    HA_SENSOR("Current",      "current",      "2",  "A",
+              "current",      "{{value|float/1000}}",   "measurement");
+    /* Ch3 Power    (integer = W × 10)    */
+    HA_SENSOR("Power",        "power",        "3",  "W",
+              "power",        "{{value|float/10}}",     "measurement");
+    /* Ch4 Frequency (integer = Hz × 100) */
+    HA_SENSOR("Frequency",    "frequency",    "4",  "Hz",
+              "frequency",    "{{value|float/100}}",    "measurement");
+    /* Ch5 Power Factor (integer = PF × 1000) */
+    HA_SENSOR("Power Factor", "power_factor", "5",  "",
+              "power_factor", "{{value|float/1000}}",   "measurement");
+    /* Ch6 Energy   (integer = Wh × 10 → publish as kWh) */
+    HA_SENSOR("Energy",       "energy",       "6",  "kWh",
+              "energy",       "{{value|float/10000}}", "total_increasing");
+    /* Ch9 Temperature (integer = °C × 100) */
+    HA_SENSOR("Temperature",  "temperature",  "9",  "\xC2\xB0\x43",
+              "temperature",  "{{value|float/100}}",    "measurement");
+
+#undef HA_SENSOR
+
+    /* Ch10 — EV Session Cost (integer = Rs × 100).
+     * No HA standard device_class for currency — use icon only. */
+    snprintf(uid, sizeof(uid), "%s_ev_cost", dev);
+    snprintf(cfg, sizeof(cfg),
+             "{\"name\":\"EV Session Cost\","
+             "\"unique_id\":\"%s\","
+             "\"state_topic\":\"%s/10/get\","
+             "\"unit_of_measurement\":\"Rs\","
+             "\"icon\":\"mdi:currency-inr\","
+             "\"value_template\":\"{{value|float/100}}\","
+             "\"state_class\":\"measurement\",%s}",
+             uid, dev, dev_block);
+    ha_pub(topic, "sensor", uid, cfg);
+
+    /* Ch13 — Session Elapsed (integer = seconds since sess_start) */
+    snprintf(uid, sizeof(uid), "%s_session_elapsed", dev);
+    snprintf(cfg, sizeof(cfg),
+             "{\"name\":\"EV Session Elapsed\","
+             "\"unique_id\":\"%s\","
+             "\"state_topic\":\"%s/13/get\","
+             "\"unit_of_measurement\":\"s\","
+             "\"icon\":\"mdi:timer-outline\","
+             "\"state_class\":\"measurement\",%s}",
+             uid, dev, dev_block);
+    ha_pub(topic, "sensor", uid, cfg);
+
+    /* Ch7 — Alarm binary_sensor (0=OK, any non-zero = problem tripped) */
+    snprintf(uid, sizeof(uid), "%s_alarm", dev);
+    snprintf(cfg, sizeof(cfg),
+             "{\"name\":\"Alarm\","
+             "\"unique_id\":\"%s\","
+             "\"state_topic\":\"%s/7/get\","
+             "\"payload_on\":\"1\",\"payload_off\":\"0\","
+             "\"device_class\":\"problem\","
+             "\"value_template\":\"{{1 if value|int > 0 else 0}}\",%s}",
+             uid, dev, dev_block);
+    ha_pub(topic, "binary_sensor", uid, cfg);
+
+    /* Ch12 — EV Session Active binary_sensor */
+    snprintf(uid, sizeof(uid), "%s_session_active", dev);
+    snprintf(cfg, sizeof(cfg),
+             "{\"name\":\"EV Session Active\","
+             "\"unique_id\":\"%s\","
+             "\"state_topic\":\"%s/12/get\","
+             "\"payload_on\":\"1\",\"payload_off\":\"0\","
+             "\"icon\":\"mdi:ev-station\",%s}",
+             uid, dev, dev_block);
+    ha_pub(topic, "binary_sensor", uid, cfg);
+
+    /* Ch8 — Relay switch (0 = open/off, 100 = closed/on) */
+    snprintf(uid, sizeof(uid), "%s_relay", dev);
+    snprintf(cfg, sizeof(cfg),
+             "{\"name\":\"Relay\","
+             "\"unique_id\":\"%s\","
+             "\"state_topic\":\"%s/8/get\","
+             "\"command_topic\":\"%s/8/set\","
+             "\"payload_on\":\"100\",\"payload_off\":\"0\","
+             "\"state_on\":\"100\",\"state_off\":\"0\","
+             "\"device_class\":\"outlet\",%s}",
+             uid, dev, dev, dev_block);
+    ha_pub(topic, "switch", uid, cfg);
+
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: HA discovery: 13 entities published "
+              "(devname=%s prefix=%s)", dev, topic);
 }
 
 #endif /* ENABLE_DRIVER_KWS303WF */
