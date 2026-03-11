@@ -156,7 +156,13 @@ static int     g_pin_res = ST7735_DEFAULT_RES;
 static int     g_pin_dc  = ST7735_DEFAULT_DC;
 static int     g_pin_cs  = ST7735_DEFAULT_CS;
 static int     g_pin_blk = ST7735_DEFAULT_BLK;
-static uint8_t g_initialized = 0;
+static uint8_t g_initialized  = 0;
+/* g_splash_ticks declared here (Section B) so all command handlers below,
+ * including CMD_Update (BUG-13 FIX), can reference it without a forward
+ * declaration.  The variable is set in ST7735_Init() and counted down in
+ * ST7735_RunEverySecond().  Declared at file scope rather than near its
+ * first use to satisfy C99 single-pass scoping rules.                    */
+static uint8_t g_splash_ticks = 0;
 
 static uint8_t  g_cur_col   = 0;
 static uint8_t  g_cur_row   = 0;
@@ -938,10 +944,8 @@ static void draw_boot_splash(void)
     ST7735_DrawString(2, 112, "OpenBK7231T",    ST7735_GREY,  ST7735_BLACK, S1);
 }
 
-/* Counts down from ST7735_SPLASH_MS/1000 seconds in RunEverySecond().
- * While > 0 the splash is visible; when it reaches 0 the energy screen
- * is initialised and normal operation begins.                           */
-static uint8_t g_splash_ticks = 0;
+/* NOTE: g_splash_ticks is declared in Section B (near g_initialized) so that
+ * CMD_Update() can reference it without a forward declaration.  See Section B. */
 
 /* ══════════════════════════════════════════════════════════════════════════
  * SECTION I — OPENBK LIFECYCLE
