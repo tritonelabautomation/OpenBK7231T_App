@@ -68,7 +68,7 @@
  * ── New console commands ───────────────────────────────────────────────────
  *   kws_detect_w [W]        — get/set auto-detect power threshold (default 500W)
  *   kws_history_dump        — print session history CSV to UART log
- *   kws_history_clear       — truncate /kws_history.csv
+ *   kws_history_clear       — truncate kws_history.csv
  *   kws_lifetime [Wh]       — get/set lifetime energy odometer
  *   kws_session_stat        — shows elapsed time, detect_w, lifetime_now
  *   [-] button (P20)        — cycles vehicle profile (2W↔4W) at any time
