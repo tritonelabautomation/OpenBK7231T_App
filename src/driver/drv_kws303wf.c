@@ -16,6 +16,8 @@
  *                             status bar colour and timer source selection
  *   Ch 13 = Session elapsed  (seconds since sess_start, resets at sess_end)
  *                             — display shows H:MM:SS; MQTT uses duration_s
+ *   Ch 14 = NTC thermal alarm (0=normal, 1=alarm latched/relay opened)
+ *                             — read by drv_st7735 to colour temp red + "THM"
  *
  * ── CHANNEL INPUT ─────────────────────────────────────────────────────────
  *   Ch 3  = Power  (W x 10)     from drv_ht7017
@@ -61,13 +63,14 @@
  * ── New channels (set in autoexec.bat) ────────────────────────────────────
  *   setChannelType 12 ReadOnly   (session active flag)
  *   setChannelType 13 ReadOnly   (session elapsed seconds)
+ *   setChannelType 14 ReadOnly   (NTC thermal alarm latch)
  *
  * ── New console commands ───────────────────────────────────────────────────
  *   kws_detect_w [W]        — get/set auto-detect power threshold (default 500W)
  *   kws_history_dump        — print session history CSV to UART log
  *   kws_history_clear       — truncate /kws_history.csv
  *   kws_lifetime [Wh]       — get/set lifetime energy odometer
- *   kws_session_stat        — now shows elapsed time, detect_w, lifetime
+ *   kws_session_stat        — shows elapsed time, detect_w, lifetime_now
  *   [-] button (P20)        — cycles vehicle profile (2W↔4W) at any time
  */
 
@@ -193,6 +196,11 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_CH_WIFI          11   /* OBK core — read-only here for MQTT guard */
 #define KWS_CH_SESS_ACTIVE   12   /* 0=idle 1=active — read by display        */
 #define KWS_CH_SESS_ELAPSED  13   /* seconds since sess_start — display timer  */
+/* IMP-A: NTC thermal alarm channel — 0=normal, 1=alarm latched (relay opened).
+ * Read by drv_st7735 to colour the temperature field red and show "THM" in the
+ * alarm zone when an over-temperature trip has occurred.
+ * Set in autoexec: setChannelType 14 ReadOnly                              */
+#define KWS_CH_NTC_ALARM     14
 
 /* FIX-PATH: BK7231N LittleFS VFS does NOT accept leading slash.
  * "/filename" → fopen returns NULL silently. "filename" works correctly.
@@ -201,6 +209,11 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_HISTORY_FILE     "kws_history.csv"   /* append-only session log   */
 #define KWS_LIFETIME_FILE    "kws_lifetime.cfg"  /* persists cumulative Wh    */
 #define KWS_MQTT_TOPIC       "home/ev/session"
+/* IMP-B: maximum rows retained in kws_history.csv.
+ * Each row ≈ 80 bytes.  200 rows = ~16 kB — well within the 512 kB LittleFS
+ * partition.  At 10 sessions/day this retains ~20 days of history while
+ * preventing unbounded flash growth.  Adjustable here at compile time.     */
+#define KWS_HISTORY_MAX_ROWS  200u
 
 /* ============================================================================
  * SECTION B — CHANNEL HELPERS
@@ -445,6 +458,7 @@ static void ntc_tick(void)
             g_ntc_fast_held = 0u;
             g_ntc_countdown = (uint8_t)NTC_FAST_PERIOD;
             relay_open();
+            PubCh(KWS_CH_NTC_ALARM, 1);   /* IMP-A: tell display + HA */
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                       "KWS303WF: *** NTC ALARM %.1fC >= %.1fC *** relay OPENED",
                       g_ntc_ema, (float)NTC_ALARM_C);
@@ -456,6 +470,7 @@ static void ntc_tick(void)
     /* Alarm hysteresis clear (5°C below alarm threshold) */
     if (g_ntc_alarm && g_ntc_ema < (NTC_ALARM_C - 5.0f)) {
         g_ntc_alarm = 0u;
+        PubCh(KWS_CH_NTC_ALARM, 0);   /* IMP-A: clear alarm channel */
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                   "KWS303WF: NTC alarm cleared %.1fC — relay stays open, manual reset required",
                   g_ntc_ema);
@@ -534,6 +549,7 @@ static commandResult_t CMD_NtcAlarmReset(const void *ctx, const char *cmd,
 {
     if (g_ntc_alarm) {
         g_ntc_alarm = 0u;
+        PubCh(KWS_CH_NTC_ALARM, 0);   /* IMP-A: clear display alarm */
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                   "KWS303WF: NTC alarm manually cleared (T=%.1fC) — use kws_relay_on to restore power",
                   g_ntc_ema);
@@ -597,6 +613,14 @@ typedef struct {
     uint32_t start_uptime_s;   /* improvement #2: g_uptime_s at sess_start() */
     uint32_t duration_s;       /* improvement #2: filled at sess_end()        */
 } EvSess_t;
+
+/* BUG-14 FIX: s_sv was a static local inside sess_tick(); it persisted across
+ * sess_end()/sess_start() cycles.  If s_sv was 59 when a session ended, the
+ * 60-second periodic save fired 1 second into the new session — causing an
+ * unnecessary flash write and leaving the timestamp 59 s ahead of the session
+ * start.  Promoted to file scope and reset in sess_start() so the 60-second
+ * save period always begins fresh with each new session.                     */
+static uint32_t g_sess_sv = 0;
 
 static EvSess_t  g_ev;
 static float     g_rate_rs = KWS_EV_RATE_DEFAULT;
@@ -672,6 +696,7 @@ static void sess_start(uint8_t veh)
     g_ev.rate_rs         = g_rate_rs;
     g_ev.start_uptime_s  = g_uptime_s;   /* improvement #2: record start time */
     g_ev.duration_s      = 0;
+    g_sess_sv            = 0;            /* BUG-14 FIX: reset 60s save timer  */
     PubCh(KWS_CH_SESS_ACTIVE,  1);       /* improvement #10: tell display      */
     PubCh(KWS_CH_SESS_ELAPSED, 0);
     sess_save();
@@ -694,16 +719,22 @@ static void sess_mqtt(void)
     float old_kl = (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_OLD_KMPL    : KWS_VEH4_OLD_KMPL;
     float km     = kwh * km_pkw;
     float saved  = km / old_kl * KWS_PETROL_RS_PER_L - cost;
-    /* improvement #2: duration_s | improvement #7: uptime_s for ordering   */
+    /* IMP-C: include ntc_alarm flag so HA automations can detect thermal trips.
+     * IMP-C: include lifetime_kwh (session total) for HA energy dashboard.
+     * Worst-case payload = 236 chars < g_mqtt_pending_pl[320]. Verified.   */
+    float lifetime_now = g_lifetime_wh + kwh * 1000.0f;   /* Wh → already in Wh */
     snprintf(g_mqtt_pending_pl, sizeof(g_mqtt_pending_pl),
              "{\"vehicle\":\"%s\",\"kwh\":%.3f,\"cost_rs\":%.2f,"
              "\"km\":%.1f,\"saved_rs\":%.2f,\"segments\":%u,"
              "\"peak_w\":%.1f,\"peak_a\":%.3f,"
-             "\"duration_s\":%u,\"uptime_s\":%u}",
+             "\"duration_s\":%u,\"uptime_s\":%u,"
+             "\"ntc_alarm\":%u,\"lifetime_kwh\":%.3f}",
              (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
              kwh, cost, km, saved, g_ev.seg_count,
              g_ev.peak_w, g_ev.peak_a,
-             (unsigned)g_ev.duration_s, (unsigned)g_uptime_s);
+             (unsigned)g_ev.duration_s, (unsigned)g_uptime_s,
+             (unsigned)g_ntc_alarm,
+             lifetime_now / 1000.0f);
     g_mqtt_pending  = 1;
     g_mqtt_attempts = 0;   /* reset for new message */
 }
@@ -734,9 +765,34 @@ static void sess_summary(void)
               g_lifetime_wh / 1000.0f);
 }
 
-/* improvement #4: append one CSV row to history file */
+/* improvement #4: append one CSV row to history file
+ * IMP-B: bounded at KWS_HISTORY_MAX_ROWS (200).  Before appending, count
+ * existing newlines in one pass.  If at limit, log a warning and skip.
+ * A single fgets loop on 200×80B = 16kB takes ~1ms — well within WDT budget.
+ * The user can reclaim space with kws_history_clear if needed.            */
 static void history_append(void)
 {
+    /* ── IMP-B: count existing rows ────────────────────────────────── */
+    {
+        FILE *fc = fopen(KWS_HISTORY_FILE, "r");
+        if (fc) {
+            uint32_t rows = 0;
+            char tmp[4];                   /* just need newline detection  */
+            while (fgets(tmp, sizeof(tmp), fc)) {
+                /* fgets returns the partial last line too; only count
+                 * lines that end in '\n' = complete rows.               */
+                if (tmp[0] != '\0' && strchr(tmp, '\n')) rows++;
+            }
+            fclose(fc);
+            if (rows >= KWS_HISTORY_MAX_ROWS) {
+                addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                          "KWS303WF: history full (%u rows) — "
+                          "use kws_history_clear to reset",
+                          (unsigned)rows);
+                return;
+            }
+        }
+    }
     FILE *f = fopen(KWS_HISTORY_FILE, "a");
     if (!f) return;
     float kwh  = g_ev.wh_session / 1000.0f;
@@ -800,9 +856,10 @@ static void sess_tick(void)
                            ? (g_uptime_s - g_ev.start_uptime_s) : 0u;
         PubCh(KWS_CH_SESS_ELAPSED, (int)elapsed);
 
-        static uint32_t s_sv = 0;
-        if (++s_sv >= 60) {
-            s_sv = 0;
+        /* BUG-14 FIX: use file-scope g_sess_sv (reset at sess_start) instead
+         * of static local — see comment at declaration above.               */
+        if (++g_sess_sv >= 60) {
+            g_sess_sv = 0;
             sess_save();
             /* improvement #8: persist lifetime Wh snapshot every 60 s */
             float snap = g_lifetime_wh + g_ev.wh_session;
@@ -919,7 +976,11 @@ static commandResult_t CMD_DetectW(const void*x,const char*c,const char*a,int f)
     return CMD_RES_OK;
 }
 
-/* improvement #4: dump history CSV over log */
+/* improvement #4: dump history CSV over log
+ * IMP-F: capped at KWS_HISTORY_DUMP_ROWS recent rows.  On a large file,
+ * unlimited addLogAdv() calls can stall the UART FIFO long enough to trigger
+ * the ~5 s WDT.  50 rows × ~80 chars each ≈ 4 kB output — safe.          */
+#define KWS_HISTORY_DUMP_ROWS  50u
 static commandResult_t CMD_HistoryDump(const void*x,const char*c,const char*a,int f)
 {
     FILE *fh = fopen(KWS_HISTORY_FILE, "r");
@@ -927,14 +988,34 @@ static commandResult_t CMD_HistoryDump(const void*x,const char*c,const char*a,in
         addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_history: no history file yet");
         return CMD_RES_OK;
     }
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "id,veh,kwh,cost_rs,km,duration_s,segs,peak_w,peak_a");
+
+    /* Count total rows first so we can skip to the last N. */
+    uint32_t total = 0;
     char line[128];
     while (fgets(line, sizeof(line), fh)) {
-        /* strip trailing newline for clean log output */
         size_t l = strlen(line);
-        if (l > 0 && line[l-1] == '\n') line[l-1] = '\0';
-        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"%s", line);
+        if (l > 0 && line[l-1] == '\n') total++;
+    }
+    rewind(fh);
+
+    uint32_t skip = (total > KWS_HISTORY_DUMP_ROWS)
+                    ? (total - KWS_HISTORY_DUMP_ROWS) : 0u;
+
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "kws_history: %u rows total, showing last %u",
+              (unsigned)total,
+              (unsigned)(total > KWS_HISTORY_DUMP_ROWS ? KWS_HISTORY_DUMP_ROWS : total));
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "id,veh,kwh,cost_rs,km,duration_s,segs,peak_w,peak_a");
+
+    uint32_t row = 0;
+    while (fgets(line, sizeof(line), fh)) {
+        size_t l = strlen(line);
+        if (l > 0 && line[l-1] == '\n') {
+            if (row++ < skip) continue;
+            line[l-1] = '\0';
+            addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"%s", line);
+        }
     }
     fclose(fh);
     return CMD_RES_OK;
@@ -957,6 +1038,9 @@ static commandResult_t CMD_SessStat(const void*x,const char*c,const char*a,int f
 {
     uint32_t elapsed = (g_ev.active && g_uptime_s > g_ev.start_uptime_s)
                        ? (g_uptime_s - g_ev.start_uptime_s) : 0u;
+    /* IMP-D: show true running lifetime total (saved + active session) so the
+     * value is current even mid-charge, not stale from the last sess_end().  */
+    float lifetime_now = g_lifetime_wh + (g_ev.active ? g_ev.wh_session : 0.0f);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
               "KWS Session: %s  veh=%s  kWh=%.3f  cost=Rs%.2f  segs=%u  elapsed=%um%02us",
               g_ev.active?"ACTIVE":"idle",
@@ -967,12 +1051,14 @@ static commandResult_t CMD_SessStat(const void*x,const char*c,const char*a,int f
               g_ev.seg_count,
               (unsigned)(elapsed/60), (unsigned)(elapsed%60));
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "  relay=%s  auto=%s  detect_w=%.0fW  uptime=%us",
+              "  relay=%s  auto=%s  detect_w=%.0fW  uptime=%us  ntc_alarm=%s",
               g_relay_closed?"CLOSED":"OPEN",
               g_auto_en?"ON":"OFF",
-              g_detect_w_min, (unsigned)g_uptime_s);
+              g_detect_w_min, (unsigned)g_uptime_s,
+              g_ntc_alarm?"LATCHED":"clear");
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "  lifetime=%.2f Wh  (%.4f kWh total)", g_lifetime_wh, g_lifetime_wh/1000.0f);
+              "  lifetime_saved=%.2f Wh  lifetime_now=%.2f Wh  (%.4f kWh total)",
+              g_lifetime_wh, lifetime_now, lifetime_now/1000.0f);
     return CMD_RES_OK;
 }
 
@@ -1050,6 +1136,7 @@ void KWS303WF_Init(void)
     g_ntc_ema       = 25.0f;   /* nominal; overwritten on first real sample */
     g_ntc_ema_prev  = 25.0f;
     g_ntc_warmup    = NTC_ADC_WARMUP_SAMPLES; /* discard first N ADC reads  */
+    PubCh(KWS_CH_NTC_ALARM, 0); /* IMP-A: initialise alarm channel = normal */
 
     btn_register(KWS_BTN_TOGGLE,   on_toggle);
     btn_register(KWS_BTN_SESSION,  on_session);
@@ -1184,11 +1271,11 @@ void KWS303WF_RunQuickTick(void)
  *   publishMQTT <topic> <payload> 1  — 3rd arg '1' = raw topic, OBK does NOT
  *   prepend the devname.  Required for "homeassistant/..." discovery topics.
  *
- * Channels published (13 total):
+ * Channels published (14 total):
  *   sensor       : Ch1 voltage, Ch2 current, Ch3 power, Ch4 frequency,
  *                  Ch5 power_factor, Ch6 energy, Ch9 temperature,
  *                  Ch10 ev_cost, Ch13 session_elapsed
- *   binary_sensor: Ch7 alarm, Ch12 session_active
+ *   binary_sensor: Ch7 alarm, Ch12 session_active, Ch14 ntc_thermal_alarm
  *   switch       : Ch8 relay
  * ============================================================================ */
 
@@ -1212,7 +1299,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
         return;
     }
 
-    /* Shared device block — groups all 13 entities under one HA device card. */
+    /* Shared device block — groups all 14 entities under one HA device card. */
     char dev_block[256];
     snprintf(dev_block, sizeof(dev_block),
              "\"device\":{\"identifiers\":[\"%s\"],"
@@ -1328,8 +1415,22 @@ void KWS303WF_OnHassDiscovery(const char *topic)
              uid, dev, dev, dev_block);
     ha_pub(topic, "switch", uid, cfg);
 
+    /* Ch14 — NTC Thermal Alarm binary_sensor (IMP-A)
+     * 0=normal, 1=alarm latched (relay was opened by over-temperature trip).
+     * HA device_class "heat" gives the flame icon and "problem" logic.      */
+    snprintf(uid, sizeof(uid), "%s_ntc_alarm", dev);
+    snprintf(cfg, sizeof(cfg),
+             "{\"name\":\"NTC Thermal Alarm\","
+             "\"unique_id\":\"%s\","
+             "\"state_topic\":\"%s/14/get\","
+             "\"payload_on\":\"1\",\"payload_off\":\"0\","
+             "\"device_class\":\"heat\","
+             "\"value_template\":\"{{1 if value|int > 0 else 0}}\",%s}",
+             uid, dev, dev_block);
+    ha_pub(topic, "binary_sensor", uid, cfg);
+
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: HA discovery: 13 entities published "
+              "KWS303WF: HA discovery: 14 entities published "
               "(devname=%s prefix=%s)", dev, topic);
 }
 
