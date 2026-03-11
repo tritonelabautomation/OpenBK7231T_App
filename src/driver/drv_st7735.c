@@ -129,9 +129,19 @@
 #define DISP_CH_WIFI     11
 #define DISP_CH_SESS_ACTIVE  12   /* improvement #1/#10: 1=session charging   */
 #define DISP_CH_SESS_ELAPSED 13   /* improvement #1: elapsed seconds from kws */
+/* IMP-A: NTC thermal alarm channel — 0=normal, 1=alarm latched.
+ * Published by drv_kws303wf.c when over-temperature trip occurs.           */
+#define DISP_CH_NTC_ALARM    14
 /* NOTE: DISP_CH_SESS_ACT and DISP_CH_SESS_ELP removed — they were duplicate
  * defines of DISP_CH_SESS_ACTIVE (12) and DISP_CH_SESS_ELAPSED (13) above.
  * Using the _ACTIVE/_ELAPSED names exclusively to avoid shadowing confusion. */
+
+/* IMP-E: temperature thresholds for display colour coding.
+ * Mirror of NTC_WARN_C / NTC_ALARM_C from drv_kws303wf.c.
+ * Kept here as driver-local defines to avoid cross-driver header dependency.
+ * Must be kept in sync with drv_kws303wf.c definitions.                    */
+#define DISP_NTC_WARN_C   60.0f    /* pre-alarm: turn temp field yellow        */
+#define DISP_NTC_ALARM_C  70.0f    /* alarm:     turn temp field red           */
 
 /* Rupee sentinel: ASCII SOH (0x01), never used by OBK console or MQTT.
  * Intercepted in DrawChar() → mapped to custom ₹ glyph at font index 95. */
@@ -559,7 +569,11 @@ static char p_v[10], p_a[10], p_w[10];
 static char p_cost[10];
 static char p_kwh[14];
 static char p_pf[10], p_hz[10];
-static char p_tc[10], p_tmr[8];
+static char p_tc[10];
+static uint16_t p_tc_col = 0;   /* IMP-E: track last temperature colour for forced redraw */
+/* NOTE: p_tmr[8] removed — BUG-12 FIX: orphaned dead variable from old
+ * display-uptime clock, replaced by p_sess_tmr[10].  Was allocated and
+ * zeroed but never passed to zone_update(), wasting 8 bytes of BSS.    */
 static char p_rly[4], p_wif[6], p_alm[4];
 static char p_sess_tmr[10];   /* improvement #1: session elapsed H:MM:SS     */
 static char p_w_lbl[4];       /* improvement #5: 'W' or 'kW' unit label      */
@@ -604,7 +618,8 @@ static void caches_clear(void)
     memset(p_pf,       '\0', sizeof(p_pf));
     memset(p_hz,       '\0', sizeof(p_hz));
     memset(p_tc,       '\0', sizeof(p_tc));
-    memset(p_tmr,      '\0', sizeof(p_tmr));
+    p_tc_col = 0;   /* IMP-E: force colour re-evaluate on next tick */
+    /* p_tmr removed — BUG-12 FIX (see declaration above) */
     memset(p_rly,      '\0', sizeof(p_rly));
     memset(p_wif,      '\0', sizeof(p_wif));
     memset(p_alm,      '\0', sizeof(p_alm));
@@ -634,6 +649,7 @@ static void display_tick(void)
     int   alm_raw    = CHANNEL_Get(DISP_CH_ALARM);
     int   sess_active = CHANNEL_Get(DISP_CH_SESS_ACTIVE);   /* improvement #10 */
     int   sess_elapsed = CHANNEL_Get(DISP_CH_SESS_ELAPSED); /* improvement #1  */
+    int   ntc_alarm  = CHANNEL_Get(DISP_CH_NTC_ALARM);      /* IMP-A           */
 
     int alm = (alm_raw >= 0 && alm_raw <= 4) ? alm_raw : 0;
 
@@ -659,11 +675,17 @@ static void display_tick(void)
         }
     }
 
-    /* STATUS BAR — alarm */
+    /* STATUS BAR — alarm
+     * IMP-A: NTC thermal alarm (Ch14) overlays "THM" in the alarm slot with
+     * priority over the HT7017 electrical alarm strings (OV/UV/OC/OP).
+     * An NTC trip is a hard safety event — it always takes precedence.
+     * If both fire simultaneously, "THM" is shown (thermal is the root cause). */
     {
         const char *an[] = {"   ", "OV ", "UV ", "OC ", "OP "};
+        const char *alarm_str = ntc_alarm ? "THM" : an[alm];
+        uint16_t    alarm_col = ntc_alarm ? ST7735_YELLOW : ST7735_RED;
         zone_update(STA_ALM_X, ROW_STA_Y, STA_ALM_W, ROW_STA_H,
-                    an[alm], ST7735_RED, S1, p_alm, sizeof(p_alm));
+                    alarm_str, alarm_col, S1, p_alm, sizeof(p_alm));
     }
 
     /* STATUS BAR — wifi */
@@ -726,9 +748,27 @@ static void display_tick(void)
     zone_update(HZ_X, ROW_PFHZ_Y, HZ_W, ROW_PFHZ_H, buf,
                 ST7735_BLUE, S1, p_hz, sizeof(p_hz));
 
-    snprintf(buf, sizeof(buf), "%05.2fC", tc);
-    zone_update(TC_X, ROW_TTY, TC_W, ROW_TTH, buf,
-                ST7735_ORANGE, S1, p_tc, sizeof(p_tc));
+    /* IMP-E: temperature field colour reflects thermal state:
+     *   < DISP_NTC_WARN_C  (60°C): ST7735_ORANGE  — normal
+     *   ≥ DISP_NTC_WARN_C  (60°C): ST7735_YELLOW  — approaching alarm
+     *   ≥ DISP_NTC_ALARM_C (70°C): ST7735_RED     — alarm tripped
+     * IMP-A: when ntc_alarm (Ch14) is latched, always use red even if
+     * temperature has since cooled below alarm threshold (latch survives).
+     * When colour changes, force a redraw by clearing the string cache so
+     * zone_update() sees a difference even if the value is unchanged.      */
+    {
+        uint16_t tc_col;
+        if (ntc_alarm || tc >= DISP_NTC_ALARM_C)      tc_col = ST7735_RED;
+        else if (tc >= DISP_NTC_WARN_C)               tc_col = ST7735_YELLOW;
+        else                                           tc_col = ST7735_ORANGE;
+        if (tc_col != p_tc_col) {
+            p_tc_col = tc_col;
+            memset(p_tc, '\0', sizeof(p_tc));  /* force redraw with new colour */
+        }
+        snprintf(buf, sizeof(buf), "%05.2fC", tc);
+        zone_update(TC_X, ROW_TTY, TC_W, ROW_TTH, buf,
+                    tc_col, S1, p_tc, sizeof(p_tc));
+    }
 
     /* improvement #1 — timer row right half:
      * Show real session elapsed time (H:MM:SS) from Ch13 when a session is
@@ -827,6 +867,23 @@ static commandResult_t CMD_Scale(const void *ctx, const char *cmd,
     if (s < 1) s = 1;
     if (s > 3) s = 3;
     g_txt_scale = (uint8_t)s;
+    return CMD_RES_OK;
+}
+
+/* ── st7735_update command ────────────────────────────────────────────────────
+ * BUG-13 FIX: command was documented in drv_st7735.h but never implemented or
+ * registered.  Calling "st7735_update" from the OBK console was silently
+ * ignored.  Fix: clear caches so every zone redraws on the next display_tick(),
+ * then call display_tick() immediately for zero-latency feedback.
+ * Only acts when g_initialized and not in splash phase (g_splash_ticks == 0).
+ * ─────────────────────────────────────────────────────────────────────────── */
+static commandResult_t CMD_Update(const void *ctx, const char *cmd,
+                                  const char *args, int flags)
+{
+    (void)ctx; (void)cmd; (void)args; (void)flags;
+    if (!g_initialized || g_splash_ticks > 0) return CMD_RES_OK;
+    caches_clear();
+    display_tick();
     return CMD_RES_OK;
 }
 
@@ -934,6 +991,7 @@ void ST7735_Init(void)
     CMD_RegisterCommand("st7735_color",      CMD_Color,      NULL);
     CMD_RegisterCommand("st7735_draw",       CMD_Draw,       NULL);
     CMD_RegisterCommand("st7735_scale",      CMD_Scale,      NULL);
+    CMD_RegisterCommand("st7735_update",     CMD_Update,     NULL);   /* BUG-13 FIX */
     CMD_RegisterCommand("st7735_version",    CMD_Version,    NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
