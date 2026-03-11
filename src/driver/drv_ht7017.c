@@ -414,8 +414,16 @@ static void LoadCal(void)
     float v=0, i=0, p=0;
     int n = fscanf(f, "V=%f\nI=%f\nP=%f\n", &v, &i, &p);
     fclose(f);
-    if (n!=3 || v<=0 || i<=0 || p==0) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017:cal invalid n=%d", n);
+    /* BUG-16 FIX: v<=0 and i<=0 do NOT catch NaN or +Inf — NaN comparisons
+     * always return false, so NaN<=0 is false and a NaN scale silently loads,
+     * causing (int)(NaN * scale) undefined behaviour in PubCh().
+     * !(v>0.0f) catches NaN (NaN>0 is false → !(false)=true → reject) AND
+     * negative values AND zero. isfinite() rejects +/-Inf explicitly.
+     * p==0.0f only checks exact zero; add isfinite(p) to reject Inf/NaN there too.
+     * Mirror of the guard already used in drv_kws303wf.c lifetime_load(). */
+    if (n!=3 || !(v>0.0f) || !isfinite(v) || !(i>0.0f) || !isfinite(i)
+             || p==0.0f  || !isfinite(p)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017:cal invalid n=%d v=%f i=%f p=%f", n, v, i, p);
         return;
     }
     g_vScale=v; g_iScale=i; g_pScale=p; g_qScale=p; g_sScale=fabsf(p);
