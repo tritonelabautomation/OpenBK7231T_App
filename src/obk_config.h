@@ -16,9 +16,9 @@
  * ────────────────────────────────────────────────────────────────────────── */
 #define KWS_FW_VERSION_MAJOR  1
 #define KWS_FW_VERSION_MINOR  0
-#define KWS_FW_VERSION_PATCH  19
+#define KWS_FW_VERSION_PATCH  19   /* BUG-16 FIX: was 16 while STR="v1.0.18"; bumped to 19 for Pass 7 */
 #define KWS_FW_VERSION_STR    "v1.0.19"
-#define KWS_FW_BUILD_DATE     "2026-03-11"
+#define KWS_FW_BUILD_DATE     "2026-03-12"   /* WARN-3 FIX: updated to Pass 7 release date */
 
 #define OBK_VARIANT_DEFAULT						0
 #define OBK_VARIANT_BERRY						1
