@@ -53,6 +53,12 @@
  *   P7 = ON coil  (HAL pin 8) — pulse HIGH → contacts CLOSE
  *   P8 = OFF coil (HAL pin 7) — pulse HIGH → contacts OPEN
  *
+ * ── RELAY ↔ SESSION LINK (FIX-UX1) ──────────────────────────────────────
+ *   relay CLOSE → sess_start() fires automatically (timer starts with current)
+ *   relay OPEN  → sess_end()   fires automatically (timer stops, cost locked)
+ *   [+] SESSION button — does NOT toggle relay; restarts timer mid-charge
+ *   [-] VEHICLE button — cycles vehicle profile (2W↔4W)
+ *
  * ── autoexec.bat ─────────────────────────────────────────────────────────
  *   startDriver HT7017
  *   startDriver ST7735 14 16 9 17 15 24
@@ -279,6 +285,11 @@ static uint8_t  g_relay_closed = 0;
 static uint8_t  g_pulse_pin    = 0;
 static uint32_t g_pulse_off_at = 0;
 
+/* Forward declarations — sess_start/sess_end are defined in SECTION F but
+ * called from relay_close/relay_open (FIX-UX1) which are in SECTION C.     */
+static void sess_start(uint8_t veh);
+static void sess_end(void);
+
 static void relay_pulse_tick(void)
 {
     if (g_pulse_pin != 0 && g_uptime_s >= g_pulse_off_at) {
@@ -305,6 +316,9 @@ static void relay_open(void)
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "KWS303WF: Relay OPEN (HAL%d→GPIO-P8 OFF-coil pulsed, load OFF)",
               KWS_RELAY_PIN_OFF);
+    /* FIX-UX1: auto-end session when relay opens so timer and cost stop
+     * immediately.  If already idle this is a no-op (sess_end guards active). */
+    if (g_ev.active) sess_end();
 }
 
 static void relay_close(void)
@@ -315,6 +329,16 @@ static void relay_close(void)
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "KWS303WF: Relay CLOSE (HAL%d→GPIO-P7 ON-coil pulsed, load ON)",
               KWS_RELAY_PIN_ON);
+    /* FIX-UX1: auto-start session when relay closes so the timer tracks charge
+     * time from the moment current can flow.  g_preferred_veh honours any [-]
+     * button pre-selection; falls back to 2W default.
+     * If a session is already active (e.g. relay_sync from Ch8 write) leave it
+     * running — don't reset the timer mid-charge. */
+    if (!g_ev.active) {
+        uint8_t veh = (g_preferred_veh != KWS_VEH_NONE) ? g_preferred_veh
+                                                         : KWS_VEH_2W;
+        sess_start(veh);
+    }
 }
 
 static void relay_sync(int ch8_val)
@@ -434,7 +458,7 @@ static void ntc_tick(void)
         g_ntc_ema += (t_raw - g_ntc_ema) / (float)NTC_EMA_N;
     }
 
-    /* ── STEP 3: Rate-of-change and delta from last publish ──────────
+    /* ── STEP 4: Rate-of-change and delta from last publish ──────────
      * dT_dt is in °C per sample interval (not °C/s).
      * At SLOW (10 s interval): NTC_FAST_TRIGGER_C=1.0 °C/sample = 6°C/min.
      * At FAST (1 s interval):  same threshold but per-second sensitivity.
@@ -445,7 +469,7 @@ static void ntc_tick(void)
     float delta_pub = g_ntc_ema - g_ntc_last_pub;
     if (delta_pub < 0.0f) delta_pub = -delta_pub;
 
-    /* ── STEP 4: LAYER 3 — ALARM (highest priority) ─────────────────
+    /* ── STEP 5: LAYER 3 — ALARM (highest priority) ─────────────────
      * T_ema ≥ NTC_ALARM_C (70°C = PVC cable insulation rating).
      * Action: open relay immediately, latch fast mode, always publish.
      * Relay does NOT auto-close after alarm clears — requires explicit
@@ -476,7 +500,7 @@ static void ntc_tick(void)
                   g_ntc_ema);
     }
 
-    /* ── STEP 5: LAYER 2 — TRANSIENT DETECTION ──────────────────────
+    /* ── STEP 6: LAYER 2 — TRANSIENT DETECTION ──────────────────────
      * Switch to FAST mode when temperature is changing meaningfully OR
      * when approaching the warning threshold.
      * g_ntc_fast_held counts ticks in FAST to enforce NTC_FAST_MIN_TICKS. */
@@ -509,7 +533,7 @@ static void ntc_tick(void)
         }
     }
 
-    /* ── STEP 6: PUBLISH GATE ────────────────────────────────────────
+    /* ── STEP 7: PUBLISH GATE ────────────────────────────────────────
      * Publish Ch9 when:
      *   (a) Temperature has changed by ≥ NTC_DEADBAND_C since last publish.
      *       At 27°C ADC noise ≈ ±0.16°C << 0.5°C deadband → zero noise publishes.
@@ -906,11 +930,18 @@ static void sess_tick(void)
 /* ============================================================================
  * SECTION G — BUTTON CALLBACKS
  * ============================================================================ */
+/* FIX-UX1: on_toggle now implicitly starts/ends session because relay_close()
+ * calls sess_start() and relay_open() calls sess_end().  No extra code needed. */
 static void on_toggle(void)   { if (g_relay_closed) relay_open(); else relay_close(); }
 static void on_session(void)
 {
-    /* BUG-10 FIX: when idle, use g_preferred_veh if the user pre-selected
-     * one with [-]; otherwise default to 2W. */
+    /* FIX-UX1: [+] SESSION button role is now "restart session timer" —
+     * it does NOT toggle the relay.  If relay is closed and a session is
+     * running, this ends the current session and immediately starts a fresh
+     * one (resetting the timer and energy offset) without interrupting power.
+     * If relay is open, it starts a session record without closing the relay
+     * (unusual, but allows manual session tracking independent of the relay).
+     * Vehicle selection: use active vehicle, or g_preferred_veh, or default 2W. */
     uint8_t veh = g_ev.active  ? g_ev.vehicle
                 : (g_preferred_veh != KWS_VEH_NONE) ? g_preferred_veh
                 : KWS_VEH_2W;
@@ -1271,7 +1302,7 @@ void KWS303WF_RunQuickTick(void)
  *   publishMQTT <topic> <payload> 1  — 3rd arg '1' = raw topic, OBK does NOT
  *   prepend the devname.  Required for "homeassistant/..." discovery topics.
  *
- * Channels published (14 total):
+ * Channels published (13 total):  /* BUG-17 FIX: was "14 total"; actual count is 13 */
  *   sensor       : Ch1 voltage, Ch2 current, Ch3 power, Ch4 frequency,
  *                  Ch5 power_factor, Ch6 energy, Ch9 temperature,
  *                  Ch10 ev_cost, Ch13 session_elapsed
@@ -1299,7 +1330,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
         return;
     }
 
-    /* Shared device block — groups all 14 entities under one HA device card. */
+    /* Shared device block — groups all 13 entities under one HA device card. /* BUG-17 FIX: was 14 */
     char dev_block[256];
     snprintf(dev_block, sizeof(dev_block),
              "\"device\":{\"identifiers\":[\"%s\"],"
@@ -1430,7 +1461,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
     ha_pub(topic, "binary_sensor", uid, cfg);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: HA discovery: 14 entities published "
+              "KWS303WF: HA discovery: 13 entities published " /* BUG-17 FIX: was 14 */
               "(devname=%s prefix=%s)", dev, topic);
 }
 
