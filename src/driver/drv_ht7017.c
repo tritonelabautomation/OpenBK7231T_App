@@ -25,6 +25,7 @@
  *   Use 1kW resistive load. Saved to ht7017cal.cfg.
  *
  * CHANGELOG (see HANDOVER.md for full bug register):
+ *   v1.0.19 (2026-03-12): Pass 7 — WARN-5: LoadCal NaN guard hardened (isfinite).
  *   v1.0.16 (2026-03-06): Pass 3 audit complete. BUG-11 fixed in kws303wf.
  *   v1.0.15 (2026-03-05): Pass 2 fixes — WARN-2 miss double-advance.
  *   v1.0.14 (2026-03-04): Pass 1 fixes applied.
@@ -414,16 +415,13 @@ static void LoadCal(void)
     float v=0, i=0, p=0;
     int n = fscanf(f, "V=%f\nI=%f\nP=%f\n", &v, &i, &p);
     fclose(f);
-    /* BUG-16 FIX: v<=0 and i<=0 do NOT catch NaN or +Inf — NaN comparisons
-     * always return false, so NaN<=0 is false and a NaN scale silently loads,
-     * causing (int)(NaN * scale) undefined behaviour in PubCh().
-     * !(v>0.0f) catches NaN (NaN>0 is false → !(false)=true → reject) AND
-     * negative values AND zero. isfinite() rejects +/-Inf explicitly.
-     * p==0.0f only checks exact zero; add isfinite(p) to reject Inf/NaN there too.
-     * Mirror of the guard already used in drv_kws303wf.c lifetime_load(). */
     if (n!=3 || !(v>0.0f) || !isfinite(v) || !(i>0.0f) || !isfinite(i)
              || p==0.0f  || !isfinite(p)) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "HT7017:cal invalid n=%d v=%f i=%f p=%f", n, v, i, p);
+        /* WARN-5 FIX: v<=0 does not reject NaN (NaN<=0 evaluates false in IEEE 754).
+         * !(v>0.0f) rejects NaN, negative, and zero.  isfinite() rejects ±Inf.
+         * Consistent with drv_kws303wf.c lifetime_load() which uses !(tmp>=0.0f). */
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "HT7017:cal invalid n=%d v=%f i=%f p=%f", n, v, i, p);
         return;
     }
     g_vScale=v; g_iScale=i; g_pScale=p; g_qScale=p; g_sScale=fabsf(p);
