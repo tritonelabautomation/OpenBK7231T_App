@@ -21,6 +21,11 @@
  *   Ch 9  = Temperature  (°C × 100)    e.g.  2716 = 27.16 °C
  *   Ch 10 = EV cost      (Rs × 100)    e.g.   376 = 3.76
  *   Ch 11 = WiFi status  (0=disconnected, 1=connected)
+ *   Ch 12 = Session active   (0=idle, 1=active) — status bar colour + timer source
+ *   Ch 13 = Session elapsed  (seconds since sess_start) — H:MM:SS timer display
+ *           FIX-UX2: always H:MM:SS ("0:12:02") — unambiguous; no MM:SS shortcut
+ *   Ch 14 = NTC thermal alarm (0=normal, 1=latched) — overlays "THM" + red temp
+ *           BUG-18 FIX: Ch12/13/14 were missing from this map (added Pass 6/7)
  *
  * ── DISPLAY LAYOUT  80×160px ─────────────────────────────────────────────
  *   Y=  0 h=10   OFF/ON  [alarm]  NoWF/WiFi    status bar
@@ -30,7 +35,7 @@
  *   Y= 83 h=23   ₹  3.76                       GREEN  scale-2
  *   Y=106 h=18   000.47kWh                     CYAN   scale-1
  *   Y=124 h=18   0.98PF  49.9Hz                RED|BLUE scale-1
- *   Y=142 h=18   27.16C  01:23                 ORANGE|WHITE scale-1
+ *   Y=142 h=18   27.2C  0:12:02      FIX-UX2: temp 1dp; timer always H:MM:SS
  *   TOTAL: 10+1+24+24+24+23+18+18+18 = 160px
  *
  * ── RUPEE GLYPH ₹ (U+20B9) ───────────────────────────────────────────────
@@ -560,9 +565,9 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *str,
 #define HZ_X    38
 #define HZ_W    42
 #define TC_X     0
-#define TC_W    40
-#define TM_X    40
-#define TM_W    40
+#define TC_W    34   /* FIX-UX2: was 40; reduced by 6px to give TM zone 7-char room */
+#define TM_X    34   /* FIX-UX2: was 40 */
+#define TM_W    46   /* FIX-UX2: was 40; 7 chars × 6px = 42px + 4px margin */
 
 #define STA_RLY_X   0
 #define STA_RLY_W  22
@@ -771,28 +776,31 @@ static void display_tick(void)
             p_tc_col = tc_col;
             memset(p_tc, '\0', sizeof(p_tc));  /* force redraw with new colour */
         }
-        snprintf(buf, sizeof(buf), "%05.2fC", tc);
+        snprintf(buf, sizeof(buf), "%04.1fC", tc);  /* FIX-UX2: was "%05.2fC" (6ch);
+                                                       * 1dp = 5 chars fits TC_W=34px */
         zone_update(TC_X, ROW_TTY, TC_W, ROW_TTH, buf,
                     tc_col, S1, p_tc, sizeof(p_tc));
     }
 
-    /* improvement #1 — timer row right half:
-     * Show real session elapsed time (H:MM:SS) from Ch13 when a session is
-     * active; show "--:--" when idle so the user knows no session is running.
-     * The old s_sec (display-uptime counter) is removed entirely.          */
+    /* FIX-UX2 — timer always shown as H:MM:SS.
+     * Previous format: MM:SS when <1h, H:MM:SS when ≥1h.
+     * Problem 1: "12:02" reads as 12h 2min or 12min 2sec — ambiguous.
+     * Problem 2: H:MM:SS (7 chars) overflowed the old 40px TM zone, clipping
+     *            the last digit for sessions ≥ 1 hour.
+     * Fix: TM zone widened to 46px (7 chars × 6px = 42px + 4px margin). TC zone
+     *      narrowed from 40px to 34px; temp precision reduced from XX.XXC to XX.XC
+     *      (1dp is sufficient for NTC accuracy of ±1-2°C).
+     * "0:12:02" is always unambiguous: leftmost digit is always hours. */
     {
         if (sess_active && sess_elapsed >= 0) {
             uint32_t el = (uint32_t)sess_elapsed;
             uint32_t hh =  el / 3600u;
             uint32_t mm = (el % 3600u) / 60u;
             uint32_t ss =  el % 60u;
-            if (hh > 0)
-                snprintf(buf, sizeof(buf), "%u:%02u:%02u", (unsigned)hh,
-                         (unsigned)mm, (unsigned)ss);
-            else
-                snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)mm, (unsigned)ss);
+            snprintf(buf, sizeof(buf), "%u:%02u:%02u",
+                     (unsigned)hh, (unsigned)mm, (unsigned)ss);
         } else {
-            snprintf(buf, sizeof(buf), "--:--");
+            snprintf(buf, sizeof(buf), "-:--:--");
         }
         zone_update(TM_X, ROW_TTY, TM_W, ROW_TTH, buf,
                     sess_active ? ST7735_CYAN : ST7735_GREY,
@@ -999,7 +1007,8 @@ void ST7735_Init(void)
     CMD_RegisterCommand("st7735_version",    CMD_Version,    NULL);
 
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "ST7735: ready 80x160 fw=%s %s rupee=idx95 sentinel=0x01 reads Ch1-13",
+              "ST7735: ready 80x160 fw=%s %s rupee=idx95 sentinel=0x01 reads Ch1-14",
+              /* BUG-18 FIX: was "reads Ch1-13"; Ch14 (NTC alarm) added in Pass 5 */
               KWS_FW_VERSION_STR, KWS_FW_BUILD_DATE);
 }
 
