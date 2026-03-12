@@ -278,6 +278,35 @@ static void lifetime_save(void)
 }
 
 /* ============================================================================
+ * EV SESSION TYPES AND STATE — hoisted before SECTION C so that relay_close()
+ * and relay_open() (FIX-UX1) can reference g_ev and g_preferred_veh without
+ * a forward declaration of a variable (not legal in C99).
+ * ============================================================================ */
+#define KWS_VEH_NONE 0
+#define KWS_VEH_2W   1
+#define KWS_VEH_4W   2
+
+typedef struct {
+    uint8_t  active;
+    uint8_t  vehicle;
+    uint8_t  wh_resume;
+    uint32_t session_id;
+    float    wh_offset;
+    float    wh_session;
+    uint32_t seg_count;
+    float    peak_w;
+    float    peak_a;
+    float    rate_rs;
+    uint32_t start_uptime_s;   /* improvement #2: g_uptime_s at sess_start() */
+    uint32_t duration_s;       /* improvement #2: filled at sess_end()        */
+} EvSess_t;
+
+static EvSess_t  g_ev;
+/* BUG-10 FIX: preferred vehicle for next auto-detect session.
+ * Set by [-] button when idle. KWS_VEH_NONE(0) = use watt-threshold logic. */
+static uint8_t   g_preferred_veh = KWS_VEH_NONE;
+
+/* ============================================================================
  * SECTION C — RELAY
  * ============================================================================ */
 static uint32_t g_uptime_s    = 0;
@@ -619,24 +648,9 @@ static void btn_tick(void)
 /* ============================================================================
  * SECTION F — EV SESSION
  * ============================================================================ */
-#define KWS_VEH_NONE 0
-#define KWS_VEH_2W   1
-#define KWS_VEH_4W   2
-
-typedef struct {
-    uint8_t  active;
-    uint8_t  vehicle;
-    uint8_t  wh_resume;
-    uint32_t session_id;
-    float    wh_offset;
-    float    wh_session;
-    uint32_t seg_count;
-    float    peak_w;
-    float    peak_a;
-    float    rate_rs;
-    uint32_t start_uptime_s;   /* improvement #2: g_uptime_s at sess_start() */
-    uint32_t duration_s;       /* improvement #2: filled at sess_end()        */
-} EvSess_t;
+/* NOTE: KWS_VEH_* defines, EvSess_t typedef, g_ev and g_preferred_veh are
+ * declared before SECTION C (see "EV SESSION TYPES" block above) because
+ * relay_close() and relay_open() reference them.  Do not re-declare here.   */
 
 /* BUG-14 FIX: s_sv was a static local inside sess_tick(); it persisted across
  * sess_end()/sess_start() cycles.  If s_sv was 59 when a session ended, the
@@ -646,12 +660,8 @@ typedef struct {
  * save period always begins fresh with each new session.                     */
 static uint32_t g_sess_sv = 0;
 
-static EvSess_t  g_ev;
 static float     g_rate_rs = KWS_EV_RATE_DEFAULT;
 static bool      g_auto_en = true;
-/* BUG-10 FIX: preferred vehicle for next auto-detect session.
- * Set by [-] button when idle. KWS_VEH_NONE(0) = use watt-threshold logic. */
-static uint8_t   g_preferred_veh = KWS_VEH_NONE;
 
 typedef enum { AD_IDLE, AD_DETECTING, AD_CHARGING } AdState_t;
 static AdState_t g_ad     = AD_IDLE;
@@ -1302,7 +1312,7 @@ void KWS303WF_RunQuickTick(void)
  *   publishMQTT <topic> <payload> 1  — 3rd arg '1' = raw topic, OBK does NOT
  *   prepend the devname.  Required for "homeassistant/..." discovery topics.
  *
- * Channels published (13 total):  /* BUG-17 FIX: was "14 total"; actual count is 13 */
+ * Channels published (13 total, BUG-19 FIX: was "14 total", actual count is 13):
  *   sensor       : Ch1 voltage, Ch2 current, Ch3 power, Ch4 frequency,
  *                  Ch5 power_factor, Ch6 energy, Ch9 temperature,
  *                  Ch10 ev_cost, Ch13 session_elapsed
@@ -1330,7 +1340,8 @@ void KWS303WF_OnHassDiscovery(const char *topic)
         return;
     }
 
-    /* Shared device block — groups all 13 entities under one HA device card. /* BUG-17 FIX: was 14 */
+    /* Shared device block — groups all 13 entities under one HA device card
+     * (BUG-19 FIX: was 14 entities; actual count is 13).                    */
     char dev_block[256];
     snprintf(dev_block, sizeof(dev_block),
              "\"device\":{\"identifiers\":[\"%s\"],"
