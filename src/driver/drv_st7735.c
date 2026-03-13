@@ -99,6 +99,21 @@
  *   Original code drew alarm string every tick without erasing first.
  *   Fix: dirty-flag cache (p_alm) + zone_update() erase on change.
  *   Raw alarm value clamped [0,4] before array index use.
+ *
+ * ── BUG-20: boot backlight sequencing ────────────────────────────────────
+ *   Root cause: SPI_BLK_L() at the top of ST7735_Init() turned the
+ *   backlight ON immediately (P24 is active-LOW on KWS-303WF hardware).
+ *   The user then saw: (1) uninitialized garbage RAM pixels, (2) a black
+ *   fill sweep scrolling from top to bottom, and (3) finally the splash.
+ *   Fix (Pass 10, 2026-03-13):
+ *     • Changed init-time call to SPI_BLK_H() — keeps backlight OFF.
+ *     • Added SPI_BLK_L() immediately after draw_boot_splash() — the
+ *       backlight fires only once the full frame is in RAM.
+ *     • Removed "st7735_brightness 1" from autoexec.bat — that call
+ *       was doing SPI_BLK_H() (OFF) which inadvertently extinguished
+ *       the backlight if autoexec ran after Init() completed.
+ *   The CMD_Brightness command (st7735_brightness 0|1) still works
+ *   correctly for runtime use.
  */
 
 #include "../obk_config.h"
@@ -188,8 +203,16 @@ static uint8_t  g_txt_scale = 1;
 #define SPI_DC_L()   HAL_PIN_SetOutputValue(g_pin_dc,  0)
 #define SPI_RES_H()  HAL_PIN_SetOutputValue(g_pin_res, 1)
 #define SPI_RES_L()  HAL_PIN_SetOutputValue(g_pin_res, 0)
-#define SPI_BLK_H()  HAL_PIN_SetOutputValue(g_pin_blk, 1)
-#define SPI_BLK_L()  HAL_PIN_SetOutputValue(g_pin_blk, 0)
+/* BUG-20 NOTE — P24 BLK pin polarity on KWS-303WF:
+ *   BLK_H() = HAL output HIGH = backlight OFF  (inactive)
+ *   BLK_L() = HAL output LOW  = backlight ON   (active-low hardware)
+ * Do NOT rename these macros — the HAL values are correct.
+ * Use SPI_BLK_ON() / SPI_BLK_OFF() as intent-safe wrappers at call sites.
+ * CMD_Brightness maps "brightness 1" → SPI_BLK_ON() internally.          */
+#define SPI_BLK_H()   HAL_PIN_SetOutputValue(g_pin_blk, 1)  /* backlight OFF */
+#define SPI_BLK_L()   HAL_PIN_SetOutputValue(g_pin_blk, 0)  /* backlight ON  */
+#define SPI_BLK_ON()  SPI_BLK_L()   /* intent-safe: enable  backlight */
+#define SPI_BLK_OFF() SPI_BLK_H()   /* intent-safe: disable backlight */
 
 static inline void spi_delay(void) { volatile int i = 4; while (i--) {} }
 
@@ -277,6 +300,10 @@ static void TFT_InitController(void)
 
     TFT_WriteCmd(ST77_NORON);  ST7735_Delay(10);
     TFT_WriteCmd(ST77_DISPON); ST7735_Delay(100);
+    /* NOTE: DISPON fires here while BLK is still OFF (SPI_BLK_OFF() was
+     * called at the top of ST7735_Init).  The panel controller is live but
+     * the backlight is dark — the user sees nothing until SPI_BLK_ON() is
+     * called after FillScreen + draw_boot_splash() complete. BUG-20 FIX.  */
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -822,17 +849,24 @@ static commandResult_t CMD_Clear(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
+/* BUG-20 NOTE: CMD_Brightness maps "1" → SPI_BLK_ON() = SPI_BLK_L() = backlight ON.
+ * This is the intent-correct mapping regardless of active-low polarity.
+ * At boot, Init() calls SPI_BLK_ON() internally after the splash is rendered;
+ * the autoexec "st7735_brightness 1" line has been removed — it is no longer
+ * needed and was calling SPI_BLK_H() (OFF) which extinguished the backlight. */
 static commandResult_t CMD_Brightness(const void *ctx, const char *cmd,
                                       const char *args, int flags)
 {
+    (void)ctx; (void)cmd; (void)flags;
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
-    if (atoi(args) > 0) { SPI_BLK_H(); } else { SPI_BLK_L(); }
+    if (atoi(args) > 0) { SPI_BLK_ON(); } else { SPI_BLK_OFF(); }
     return CMD_RES_OK;
 }
 
 static commandResult_t CMD_Goto(const void *ctx, const char *cmd,
                                 const char *args, int flags)
 {
+    (void)ctx; (void)cmd; (void)flags;
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     int col = 0, row = 0;
     sscanf(args, "%d %d", &col, &row);
@@ -844,6 +878,7 @@ static commandResult_t CMD_Goto(const void *ctx, const char *cmd,
 static commandResult_t CMD_Print(const void *ctx, const char *cmd,
                                  const char *args, int flags)
 {
+    (void)ctx; (void)cmd; (void)flags;
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     uint8_t x = (uint8_t)(g_cur_col * FONT_ADV  * g_txt_scale);
     uint8_t y = (uint8_t)(g_cur_row * FONT_VADV * g_txt_scale);
@@ -855,6 +890,7 @@ static commandResult_t CMD_Print(const void *ctx, const char *cmd,
 static commandResult_t CMD_Color(const void *ctx, const char *cmd,
                                  const char *args, int flags)
 {
+    (void)ctx; (void)cmd; (void)flags;
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     char *end;
     g_fg_colour = (uint16_t)strtol(args, &end, 0);
@@ -865,6 +901,7 @@ static commandResult_t CMD_Color(const void *ctx, const char *cmd,
 static commandResult_t CMD_Draw(const void *ctx, const char *cmd,
                                 const char *args, int flags)
 {
+    (void)ctx; (void)cmd; (void)flags;
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     int x = 0, y = 0, w = 0, h = 0;
     uint32_t colour = 0;
@@ -876,6 +913,7 @@ static commandResult_t CMD_Draw(const void *ctx, const char *cmd,
 static commandResult_t CMD_Scale(const void *ctx, const char *cmd,
                                  const char *args, int flags)
 {
+    (void)ctx; (void)cmd; (void)flags;
     if (!args || !*args) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
     int s = atoi(args);
     if (s < 1) s = 1;
@@ -929,6 +967,9 @@ static commandResult_t CMD_Version(const void *ctx, const char *cmd,
  * Uses the same font/scale as CMD_Version so both look identical.
  * The splash occupies the full 80×160 canvas; ST7735_FillScreen(BLACK) in
  * ST7735_Init() has already blanked the panel before this is called.
+ * The backlight is still OFF when this function runs — it is enabled by
+ * the SPI_BLK_ON() call immediately after draw_boot_splash() returns.
+ * This ensures the user NEVER sees the fill sweep or garbage RAM. (BUG-20)
  * ─────────────────────────────────────────────────────────────────────────── */
 #define ST7735_SPLASH_MS  2000u   /* visible for 2 seconds */
 
@@ -977,22 +1018,35 @@ void ST7735_Init(void)
     HAL_PIN_Setup_Output(g_pin_cs);  HAL_PIN_Setup_Output(g_pin_blk);
 
     SPI_CS_H(); SPI_SCK_L(); SPI_SDA_L(); SPI_DC_H(); SPI_RES_H();
-    SPI_BLK_L(); ST7735_Delay(50);
+
+    /* BUG-20 FIX — keep backlight OFF during hardware init and frame fill.
+     * P24 is active-LOW: BLK_OFF() = HAL HIGH = backlight dark.
+     * Previous code called SPI_BLK_L() here which immediately illuminated
+     * the panel, exposing uninitialised RAM garbage and the black fill
+     * sweep to the user on every boot.                                   */
+    SPI_BLK_OFF();
+    ST7735_Delay(50);
 
     TFT_HardReset();
-    TFT_InitController();
+    TFT_InitController();   /* DISPON fires here — panel live, BLK still OFF */
     g_initialized = 1;
-    ST7735_FillScreen(ST7735_BLACK);
-    /* NOTE: Backlight (BLK/P24) is NOT driven HIGH here. It is left LOW
-     * from the SPI_BLK_L() call above and enabled externally (autoexec
-     * st7735_brightness command or OBK pin binding). Driving it from Init
-     * caused a dead display on KWS-303WF hardware — do not add SPI_BLK_H()
-     * here.                                                                */
+    ST7735_FillScreen(ST7735_BLACK);   /* fill while BLK is OFF — user sees nothing */
 
-    /* Boot splash: shown for ST7735_SPLASH_MS before the energy screen.
+    /* Boot splash: drawn into RAM while backlight is still off.
      * g_splash_ticks drives the countdown in RunEverySecond().          */
     g_splash_ticks = (uint8_t)(ST7735_SPLASH_MS / 1000u);
     draw_boot_splash();
+
+    /* BUG-20 FIX — enable backlight NOW: frame is filled, splash is drawn.
+     * The user sees the complete splash appear instantly with no artifacts.
+     * IMPORTANT: Remove "st7735_brightness 1" from autoexec.bat — that
+     * command calls SPI_BLK_ON() which would be a no-op here, but if
+     * autoexec runs after this Init() has already lit the backlight, calling
+     * CMD_Brightness toggles could create a race.  The backlight is now
+     * fully managed by Init() on boot.  CMD_Brightness remains available
+     * for runtime dimming (st7735_brightness 0 / st7735_brightness 1).   */
+    SPI_BLK_ON();
+
     /* draw_static_labels() and caches_clear() are called by RunEverySecond()
      * once g_splash_ticks reaches zero — NOT here.                       */
 
