@@ -242,6 +242,13 @@ static AdState_t g_ad     = AD_IDLE;
 static uint32_t  g_adTick = 0;
 static float     g_adWsum = 0.0f;
 static uint32_t  g_endTk  = 0;
+/* BUG-16 FIX: g_adFast was declared at line 714 but first used at line 382
+ * inside relay_open() and relay_close().  C99 requires all file-scope vars to
+ * be declared before any function that references them is compiled.  Moved
+ * here to sit with the rest of the auto-detect state.
+ * Set to 1 by relay_close() to use KWS_DETECT_S_FAST instead of KWS_DETECT_S.
+ * Cleared when AD_DETECTING exits (sess_start, AD_IDLE, or relay_open).     */
+static uint8_t   g_adFast = 0;
 
 
 
@@ -708,10 +715,6 @@ static void btn_tick(void)
  * unnecessary flash write and leaving the timestamp 59 s ahead of the session
  * start.  Promoted to file scope and reset in sess_start() so the 60-second
  * save period always begins fresh with each new session.                     */
-
-/* FIX-UX3: set to 1 by relay_close() to use KWS_DETECT_S_FAST instead of
- * KWS_DETECT_S.  Cleared when AD_DETECTING exits (start, idle, or open). */
-static uint8_t   g_adFast = 0;
 
 static void sess_save(void)
 {
