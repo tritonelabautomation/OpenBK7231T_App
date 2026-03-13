@@ -15,10 +15,18 @@
  * KWS_FW_BUILD_DATE   is set manually to the ISO date of the release commit.
  * ────────────────────────────────────────────────────────────────────────── */
 #define KWS_FW_VERSION_MAJOR  1
-#define KWS_FW_VERSION_MINOR  0
-#define KWS_FW_VERSION_PATCH  21   /* FIX-UX3: load-detect window on relay close; bumped to 21 for Pass 9 */
-#define KWS_FW_VERSION_STR    "v1.0.21"
-#define KWS_FW_BUILD_DATE     "2026-03-13"   /* Pass 9 release date */
+#define KWS_FW_VERSION_MINOR  1              /* MINOR bump: new features batch IMP-G..N */
+#define KWS_FW_VERSION_PATCH  0
+/* IMP-G: rate persistence (kws_rate.cfg)
+ * IMP-H: protection threshold persistence (kws_protection.cfg)
+ * IMP-I: CO2 saved estimate in MQTT session payload
+ * IMP-J: daily kWh summary + midnight MQTT publish (kws_daily.cfg)
+ * IMP-K: reboot counter in kws_lifetime.cfg
+ * IMP-L: MQTT keepalive/heartbeat publish every KWS_HEARTBEAT_S seconds
+ * IMP-M: persistent fault log (kws_faults.log, last 20 faults)
+ * IMP-N: display dim/sleep after KWS_DISPLAY_DIM_S seconds idle */
+#define KWS_FW_VERSION_STR    "v1.1.0"
+#define KWS_FW_BUILD_DATE     "2026-03-13"   /* Pass 11 — IMP-G..N feature batch */
 
 #define OBK_VARIANT_DEFAULT						0
 #define OBK_VARIANT_BERRY						1
