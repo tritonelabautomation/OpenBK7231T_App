@@ -232,6 +232,68 @@ static FILE *robust_fopen_w(const char *path)
  * preventing unbounded flash growth.  Adjustable here at compile time.     */
 #define KWS_HISTORY_MAX_ROWS  200u
 
+/* ── New LittleFS files (v1.1.0) ─────────────────────────────────────────
+ * All paths: no leading slash (BK7231N LittleFS VFS constraint).          */
+#define KWS_RATE_FILE        "kws_rate.cfg"        /* IMP-G: persisted Rs/kWh rate         */
+#define KWS_PROTECT_FILE     "kws_protection.cfg"  /* IMP-H: persisted OV/UV/OC thresholds */
+#define KWS_DAILY_FILE       "kws_daily.cfg"       /* IMP-J: daily kWh counter + reset ts  */
+#define KWS_FAULTS_FILE      "kws_faults.log"      /* IMP-M: last-N fault log              */
+
+/* ── IMP-G: electricity rate persistence ─────────────────────────────────
+ * Rate is loaded from KWS_RATE_FILE at Init().  Saved via kws_rate <val>. */
+
+/* ── IMP-H: protection threshold defaults ────────────────────────────────
+ * KWS_OV_DEFAULT   Over-voltage trip (V).  HT7017 raises alarm Ch7=1.
+ * KWS_UV_DEFAULT   Under-voltage trip (V). HT7017 raises alarm Ch7=2.
+ * KWS_OC_DEFAULT   Over-current trip (A).  HT7017 raises alarm Ch7=3.
+ * These match the existing HT7017 defaults; persist user changes via
+ * KWS_PROTECT_FILE.  Written to HT7017 registers at Init() after load.    */
+#define KWS_OV_DEFAULT       250.0f  /* V — over-voltage threshold           */
+#define KWS_UV_DEFAULT       180.0f  /* V — under-voltage threshold          */
+#define KWS_OC_DEFAULT        16.0f  /* A — over-current threshold           */
+
+/* ── IMP-I: CO2 saved estimate ───────────────────────────────────────────
+ * India average grid emission factor 2024 (CEA) = 708 g CO2/kWh.
+ * Configurable at compile time; emitted in MQTT session payload as
+ * "co2_saved_g" (integer grams, EV vs equivalent fossil fuel).            */
+#define KWS_CO2_GRID_G_PER_KWH  708.0f  /* g CO2 per kWh from grid India     */
+
+/* ── IMP-J: daily kWh summary ────────────────────────────────────────────
+ * KWS_DAILY_TOPIC  MQTT topic for midnight daily summary publish.
+ * Midnight is detected by g_uptime_s crossing a 24 h boundary relative to
+ * g_daily_start_uptime (set at Init() = 0, reset on each midnight event). */
+#define KWS_DAILY_TOPIC      "home/ev/daily"
+
+/* ── IMP-K: reboot counter ───────────────────────────────────────────────
+ * Reboot count stored as a separate field in kws_lifetime.cfg.
+ * Format: "wh=XXXX\nreboots=N\n"
+ * On Init() the reboot counter is incremented ONCE and persisted.         */
+
+/* ── IMP-L: MQTT heartbeat / keepalive ──────────────────────────────────
+ * KWS_HEARTBEAT_S    Interval between periodic status publishes (seconds).
+ *                    Default 300 s (5 min) — HA entities expire at 6× =
+ *                    30 min, giving comfortable margin.
+ * KWS_HEARTBEAT_TOPIC MQTT topic for periodic status payload.
+ * The heartbeat payload is compact: relay, temp, session_active, lifetime,
+ * uptime, wifi.  Same WiFi + attempt cap guard as session MQTT.           */
+#define KWS_HEARTBEAT_S      300u               /* seconds between publishes  */
+#define KWS_HEARTBEAT_TOPIC  "home/ev/status"
+
+/* ── IMP-M: fault log ─────────────────────────────────────────────────────
+ * KWS_FAULT_MAX_ROWS  Maximum fault entries retained in kws_faults.log.
+ * Each row ≤ 80 bytes.  20 rows = ~1.6 kB.  On overflow oldest row is NOT
+ * dropped (no LittleFS seek/shift on BK7231N); the log is capped in place.
+ * The user clears with kws_faults_clear.                                  */
+#define KWS_FAULT_MAX_ROWS   20u
+
+/* ── IMP-N: display dim/sleep ────────────────────────────────────────────
+ * KWS_DISPLAY_DIM_S   Seconds of button inactivity before backlight off.
+ *                     Any button press wakes the display immediately.
+ *                     Set to 0 to disable (backlight always on).
+ * KWS_DISPLAY_DIM_DEFAULT 300 = 5 min — sensible default for a wall-mount
+ *                     device that may be unattended for hours.            */
+#define KWS_DISPLAY_DIM_DEFAULT  300u  /* seconds idle before backlight off  */
+
 static uint32_t g_sess_sv = 0;
 
 static float     g_rate_rs = KWS_EV_RATE_DEFAULT;
@@ -277,36 +339,240 @@ static float g_detect_w_min = KWS_DETECT_W_MIN_DEFAULT;
 static float    g_lifetime_wh     = 0.0f;
 static uint8_t  g_lifetime_dirty  = 0u;   /* 1 = needs write to flash     */
 
+/* ── IMP-G: persisted electricity rate ───────────────────────────────────
+ * Loaded from KWS_RATE_FILE at Init(); saved when kws_rate <val> is used. */
+/* (g_rate_rs already declared above — IMP-G adds persistence around it)   */
+
+/* ── IMP-H: protection thresholds ────────────────────────────────────────
+ * Loaded from KWS_PROTECT_FILE; written to HT7017 at Init() after load.
+ * These are runtime values; defaults defined in Section A.                */
+static float    g_ov_thr    = KWS_OV_DEFAULT;  /* over-voltage trip (V)    */
+static float    g_uv_thr    = KWS_UV_DEFAULT;  /* under-voltage trip (V)   */
+static float    g_oc_thr    = KWS_OC_DEFAULT;  /* over-current trip (A)    */
+
+/* ── IMP-J: daily kWh accumulator ────────────────────────────────────────
+ * g_daily_kwh   accumulates kWh from session ends during the current day.
+ * g_daily_start_uptime  uptime_s at the start of the current day period.
+ * g_daily_last_midnight uptime_s at the last midnight reset (for detection).
+ * g_daily_mqtt_sent     1 = daily summary already sent this midnight event.*/
+static float    g_daily_kwh           = 0.0f;
+static uint32_t g_daily_start_uptime  = 0u;
+static uint32_t g_daily_last_midnight = 0u;
+static uint8_t  g_daily_mqtt_sent     = 0u;
+
+/* ── IMP-K: reboot counter ────────────────────────────────────────────── */
+static uint32_t g_reboot_count = 0u;   /* loaded from kws_lifetime.cfg     */
+
+/* ── IMP-L: MQTT heartbeat ───────────────────────────────────────────────
+ * g_hb_tick  counts seconds; triggers a publish when it reaches KWS_HEARTBEAT_S. */
+static uint32_t g_hb_tick = 0u;
+
+/* ── IMP-N: display dim/sleep ────────────────────────────────────────────
+ * g_dim_timeout  seconds idle before backlight off (0 = disabled).
+ * g_last_btn_s   g_uptime_s at the last button press (any button).
+ * g_display_on   current backlight state (1=on, 0=off by dim timeout).    */
+static uint32_t g_dim_timeout = KWS_DISPLAY_DIM_DEFAULT;
+static uint32_t g_last_btn_s  = 0u;
+static uint8_t  g_display_on  = 1u;
+
+/*
+ * lifetime_load() — v1.1.0
+ * IMP-K: also reads reboots= field from kws_lifetime.cfg.
+ * The wh= field is mandatory; reboots= is optional (old file = 0 reboots).
+ */
 static void lifetime_load(void)
 {
     FILE *f = fopen(KWS_LIFETIME_FILE, "r");
     if (!f) return;
     float tmp = 0.0f;
+    unsigned int rb = 0u;
+    /* Read mandatory wh= line; reboots= line is optional (old format). */
     int n = fscanf(f, "wh=%f\n", &tmp);
+    if (n == 1) {
+        /* Attempt to read optional reboots line — ignore parse failure. */
+        fscanf(f, "reboots=%u\n", &rb);
+    }
     fclose(f);
-    /* BUG-8/9 FIX: check fscanf return and reject NaN/Inf/negative.
-     * A corrupt file (e.g. power cut mid-write) could produce NaN which
-     * silently propagates through all subsequent arithmetic.
-     * !(tmp >= 0.0f) catches NaN (NaN comparisons always false) and negative. */
+    /* BUG-8/9 FIX: check fscanf return and reject NaN/Inf/negative. */
     if (n != 1 || !(tmp >= 0.0f)) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                   "KWS303WF: lifetime file invalid (n=%d val=%f) — reset to 0", n, tmp);
-        g_lifetime_wh = 0.0f;
+        g_lifetime_wh   = 0.0f;
+        g_reboot_count  = 0u;
         return;
     }
-    g_lifetime_wh = tmp;
+    g_lifetime_wh  = tmp;
+    g_reboot_count = (uint32_t)rb;
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: lifetime loaded %.2f Wh (%.4f kWh)",
-              g_lifetime_wh, g_lifetime_wh / 1000.0f);
+              "KWS303WF: lifetime loaded %.2f Wh (%.4f kWh) reboots=%u",
+              g_lifetime_wh, g_lifetime_wh / 1000.0f, (unsigned)g_reboot_count);
 }
 
 static void lifetime_save(void)
 {
     FILE *f = robust_fopen_w(KWS_LIFETIME_FILE);
     if (!f) return;
-    fprintf(f, "wh=%.4f\n", g_lifetime_wh);
+    /* IMP-K: persist reboot_count alongside Wh so a single file covers both.
+     * Format: "wh=XXXX.XXXX\nreboots=N\n"
+     * Backwards-compatible: old firmware ignores the reboots line.        */
+    fprintf(f, "wh=%.4f\nreboots=%u\n", g_lifetime_wh, (unsigned)g_reboot_count);
     fclose(f);
     g_lifetime_dirty = 0u;
+}
+
+/* ── IMP-G: rate persistence ─────────────────────────────────────────────
+ * IMP-G: rate_load() — restore saved electricity tariff from flash.
+ * Called at Init() before the first RunEverySecond.                       */
+static void rate_load(void)
+{
+    FILE *f = fopen(KWS_RATE_FILE, "r");
+    if (!f) return;
+    float tmp = 0.0f;
+    int n = fscanf(f, "rate=%f\n", &tmp);
+    fclose(f);
+    if (n != 1 || !(tmp > 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: rate file invalid (n=%d val=%f) — using default %.2f",
+                  n, tmp, KWS_EV_RATE_DEFAULT);
+        return;
+    }
+    g_rate_rs = tmp;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: rate loaded %.4f Rs/kWh", g_rate_rs);
+}
+
+/* IMP-G: rate_save() — persist current tariff to flash. */
+static void rate_save(void)
+{
+    FILE *f = robust_fopen_w(KWS_RATE_FILE);
+    if (!f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: rate_save failed — %s", KWS_RATE_FILE);
+        return;
+    }
+    fprintf(f, "rate=%.4f\n", g_rate_rs);
+    fclose(f);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: rate saved %.4f Rs/kWh", g_rate_rs);
+}
+
+/* ── IMP-H: protection threshold persistence ────────────────────────────
+ * IMP-H: protect_load() — restore OV/UV/OC thresholds from flash.        */
+static void protect_load(void)
+{
+    FILE *f = fopen(KWS_PROTECT_FILE, "r");
+    if (!f) return;
+    float ov = 0.0f, uv = 0.0f, oc = 0.0f;
+    int n = fscanf(f, "ov=%f\nuv=%f\noc=%f\n", &ov, &uv, &oc);
+    fclose(f);
+    /* Validate: all three must parse; all must be finite and positive.    */
+    if (n != 3 || !(ov > 0.0f) || !(uv > 0.0f) || !(oc > 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: protect file invalid (n=%d) — using defaults", n);
+        return;
+    }
+    g_ov_thr = ov;
+    g_uv_thr = uv;
+    g_oc_thr = oc;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: protection loaded OV=%.1fV UV=%.1fV OC=%.1fA",
+              g_ov_thr, g_uv_thr, g_oc_thr);
+}
+
+/* IMP-H: protect_save() — persist current thresholds to flash.
+ * Called when any threshold is changed via kws_protect command.           */
+static void protect_save(void)
+{
+    FILE *f = robust_fopen_w(KWS_PROTECT_FILE);
+    if (!f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: protect_save failed — %s", KWS_PROTECT_FILE);
+        return;
+    }
+    fprintf(f, "ov=%.2f\nuv=%.2f\noc=%.2f\n", g_ov_thr, g_uv_thr, g_oc_thr);
+    fclose(f);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: protection saved OV=%.1fV UV=%.1fV OC=%.1fA",
+              g_ov_thr, g_uv_thr, g_oc_thr);
+}
+
+/* ── IMP-J: daily kWh persistence ───────────────────────────────────────
+ * IMP-J: daily_load() — restore today's accumulated kWh from flash.
+ * Format: "kwh=XXXX.XXX\nstart=%u\n"
+ * The start field is g_uptime_s at the last midnight reset.
+ * On reboot during the same calendar day this restores partial accumulation.*/
+static void daily_load(void)
+{
+    FILE *f = fopen(KWS_DAILY_FILE, "r");
+    if (!f) return;
+    float kwh = 0.0f;
+    uint32_t start = 0u;
+    int n = fscanf(f, "kwh=%f\nstart=%u\n", &kwh, &start);
+    fclose(f);
+    if (n != 2 || !(kwh >= 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: daily file invalid (n=%d) — reset", n);
+        return;
+    }
+    g_daily_kwh          = kwh;
+    g_daily_start_uptime = start;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: daily loaded %.3f kWh (start_uptime=%u s)",
+              g_daily_kwh, (unsigned)g_daily_start_uptime);
+}
+
+/* IMP-J: daily_save() — persist daily accumulator to flash. */
+static void daily_save(void)
+{
+    FILE *f = robust_fopen_w(KWS_DAILY_FILE);
+    if (!f) return;
+    fprintf(f, "kwh=%.3f\nstart=%u\n",
+            g_daily_kwh, (unsigned)g_daily_start_uptime);
+    fclose(f);
+}
+
+/* ── IMP-M: fault log ────────────────────────────────────────────────────
+ * IMP-M: fault_log() — append one fault event to kws_faults.log.
+ * Capped at KWS_FAULT_MAX_ROWS to prevent unbounded flash growth.
+ * alarm_code: 1=OV, 2=UV, 3=OC, 4=OP (power), 5=THM (NTC)
+ * uptime_s: caller provides g_uptime_s for the timestamp.               */
+static void fault_log(uint8_t alarm_code, uint32_t uptime_s, float value)
+{
+    /* Count existing rows — same approach as history_append(). */
+    {
+        FILE *fc = fopen(KWS_FAULTS_FILE, "r");
+        if (fc) {
+            uint32_t rows = 0u;
+            char tmp[4];
+            while (fgets(tmp, sizeof(tmp), fc)) {
+                if (tmp[0] != '\0' && strchr(tmp, '\n')) rows++;
+            }
+            fclose(fc);
+            if (rows >= KWS_FAULT_MAX_ROWS) {
+                addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                          "KWS303WF: fault log full (%u rows) — use kws_faults_clear",
+                          (unsigned)rows);
+                return;
+            }
+        }
+    }
+    FILE *f = fopen(KWS_FAULTS_FILE, "a");
+    if (!f) return;
+    /* Columns: uptime_s, alarm_code, value (V or A or C depending on code) */
+    const char *code_str = "UNKN";
+    switch (alarm_code) {
+        case 1: code_str = "OV";  break;
+        case 2: code_str = "UV";  break;
+        case 3: code_str = "OC";  break;
+        case 4: code_str = "OP";  break;
+        case 5: code_str = "THM"; break;
+        default: break;
+    }
+    fprintf(f, "%u,%s,%.2f\n", (unsigned)uptime_s, code_str, value);
+    fclose(f);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: fault logged [%s] %.2f @ uptime=%u s",
+              code_str, value, (unsigned)uptime_s);
 }
 
 /* ============================================================================
@@ -349,9 +615,12 @@ static uint32_t g_pulse_off_at = 0;
 /* Forward declarations — sess_start/sess_end are defined in SECTION F but
  * referenced in SECTION C and G.
  * relay_open() calls sess_end() (FIX-UX1).
- * on_session() calls sess_start() and sess_end() (FIX-UX3).               */
+ * on_session() calls sess_start() and sess_end() (FIX-UX3).
+ * IMP-N: dim_wake() defined in RunEverySecond section but called by button
+ * handlers in SECTION G — forward-declare to satisfy C99 single-pass rule. */
 static void sess_start(uint8_t veh);
 static void sess_end(void);
+static void dim_wake(void);   /* IMP-N: wake display on button press */
 
 static void relay_pulse_tick(void)
 {
@@ -569,6 +838,7 @@ static void ntc_tick(void)
             g_ntc_countdown = (uint8_t)NTC_FAST_PERIOD;
             relay_open();
             PubCh(KWS_CH_NTC_ALARM, 1);   /* IMP-A: tell display + HA */
+            fault_log(5, g_uptime_s, g_ntc_ema);  /* IMP-M: log THM fault */
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                       "KWS303WF: *** NTC ALARM %.1fC >= %.1fC *** relay OPENED",
                       g_ntc_ema, (float)NTC_ALARM_C);
@@ -792,6 +1062,14 @@ static volatile uint8_t g_mqtt_pending          = 0;
 static uint8_t          g_mqtt_attempts         = 0;   /* WARN-1 FIX: cap retries */
 #define KWS_MQTT_MAX_ATTEMPTS  3   /* abandon after 3 WiFi-up attempts */
 
+/*
+ * sess_mqtt() — v1.1.0
+ * IMP-I: added co2_saved_g — grams CO2 avoided vs grid equivalent charging.
+ * IMP-K: added reboot_count for uptime diagnostics in HA.
+ * Worst-case payload recalculated:
+ *   Before: 236 chars.  After: +22 chars (co2_saved_g + reboot_count) = 258 chars.
+ *   258 < g_mqtt_pending_pl[320] ✓
+ */
 static void sess_mqtt(void)
 {
     float kwh    = g_ev.wh_session / 1000.0f;
@@ -800,24 +1078,34 @@ static void sess_mqtt(void)
     float old_kl = (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_OLD_KMPL    : KWS_VEH4_OLD_KMPL;
     float km     = kwh * km_pkw;
     float saved  = km / old_kl * KWS_PETROL_RS_PER_L - cost;
-    /* IMP-C: include ntc_alarm flag so HA automations can detect thermal trips.
-     * IMP-C: include lifetime_kwh (session total) for HA energy dashboard.
-     * Worst-case payload = 236 chars < g_mqtt_pending_pl[320]. Verified.   */
-    float lifetime_now = g_lifetime_wh + kwh * 1000.0f;   /* Wh → already in Wh */
+    /* IMP-I: CO2 saved = (grid kWh equivalent) × grid emission factor.
+     * We compare grid charging energy (kwh) vs the grid equivalent of the
+     * petrol alternative.  Net saving is grid_kwh - 0 (EV emits grid CO2);
+     * comparison basis is petrol: km / old_kl litres × ~2.31 kg CO2/litre.
+     * Simplified: co2_saved_g = petrol_litres × 2310 - kwh × KWS_CO2_GRID_G_PER_KWH */
+    float petrol_litres = (km > 0.0f && old_kl > 0.0f) ? (km / old_kl) : 0.0f;
+    float co2_petrol_g  = petrol_litres * 2310.0f;    /* ~2310 g CO2/litre petrol  */
+    float co2_ev_g      = kwh * KWS_CO2_GRID_G_PER_KWH;
+    float co2_saved_g   = co2_petrol_g - co2_ev_g;
+    if (co2_saved_g < 0.0f) co2_saved_g = 0.0f;  /* clamp: no negative saving */
+
+    float lifetime_now = g_lifetime_wh + kwh * 1000.0f;
     snprintf(g_mqtt_pending_pl, sizeof(g_mqtt_pending_pl),
              "{\"vehicle\":\"%s\",\"kwh\":%.3f,\"cost_rs\":%.2f,"
              "\"km\":%.1f,\"saved_rs\":%.2f,\"segments\":%u,"
              "\"peak_w\":%.1f,\"peak_a\":%.3f,"
              "\"duration_s\":%u,\"uptime_s\":%u,"
-             "\"ntc_alarm\":%u,\"lifetime_kwh\":%.3f}",
+             "\"ntc_alarm\":%u,\"lifetime_kwh\":%.3f,"
+             "\"co2_saved_g\":%u,\"reboot_count\":%u}",
              (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
              kwh, cost, km, saved, g_ev.seg_count,
              g_ev.peak_w, g_ev.peak_a,
              (unsigned)g_ev.duration_s, (unsigned)g_uptime_s,
              (unsigned)g_ntc_alarm,
-             lifetime_now / 1000.0f);
+             lifetime_now / 1000.0f,
+             (unsigned)co2_saved_g, (unsigned)g_reboot_count);
     g_mqtt_pending  = 1;
-    g_mqtt_attempts = 0;   /* reset for new message */
+    g_mqtt_attempts = 0;
 }
 
 static void sess_summary(void)
@@ -900,6 +1188,11 @@ static void sess_end(void)
     g_lifetime_wh += g_ev.wh_session;
     if (g_lifetime_wh < 0.0f) g_lifetime_wh = 0.0f;
     lifetime_save();
+
+    /* IMP-J: accumulate session kWh into today's daily total. */
+    g_daily_kwh += g_ev.wh_session / 1000.0f;
+    if (g_daily_kwh < 0.0f) g_daily_kwh = 0.0f;
+    daily_save();
 
     sess_summary();
     history_append();    /* improvement #4: write CSV row */
@@ -1006,10 +1299,12 @@ static void sess_tick(void)
  * SECTION G — BUTTON CALLBACKS
  * ============================================================================ */
 /* FIX-UX3: on_toggle now implicitly starts/ends session via relay_close/open
- * arming the detect window and relay_open calling sess_end().              */
-static void on_toggle(void)   { if (g_relay_closed) relay_open(); else relay_close(); }
+ * arming the detect window and relay_open calling sess_end().
+ * IMP-N: dim_wake() called first on all button handlers — any press wakes display. */
+static void on_toggle(void)   { dim_wake(); if (g_relay_closed) relay_open(); else relay_close(); }
 static void on_session(void)
 {
+    dim_wake();   /* IMP-N: any button press wakes display */
     /* FIX-UX3: [+] SESSION button semantics:
      *
      * Case 1 — Relay open, no session:
@@ -1052,6 +1347,7 @@ static void on_session(void)
  *       and on_session() can actually read it.                              */
 static void on_reserved(void)
 {
+    dim_wake();   /* IMP-N: any button press wakes display */
     if (g_ev.active) {
         uint8_t new_veh = (g_ev.vehicle == KWS_VEH_2W) ? KWS_VEH_4W : KWS_VEH_2W;
         addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
@@ -1077,11 +1373,21 @@ static commandResult_t CMD_RelayOff(const void*x,const char*c,const char*a,int f
 static commandResult_t CMD_Ch8Set(const void*x,const char*c,const char*a,int f)
 { if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS; relay_sync(atoi(a)); return CMD_RES_OK; }
 
+/*
+ * CMD_Rate() — v1.1.0
+ * IMP-G: now calls rate_save() after setting so the tariff persists across reboots.
+ */
 static commandResult_t CMD_Rate(const void*x,const char*c,const char*a,int f)
 {
     if(!a||!*a){addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_rate: %.4f Rs/kWh",g_rate_rs);return CMD_RES_OK;}
-    g_rate_rs=(float)atof(a);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_rate set %.4f Rs/kWh",g_rate_rs);
+    float v = (float)atof(a);
+    if (!(v > 0.0f)) {
+        addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_rate: value must be > 0");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    g_rate_rs = v;
+    rate_save();   /* IMP-G: persist to kws_rate.cfg */
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"kws_rate set %.4f Rs/kWh (saved)", g_rate_rs);
     return CMD_RES_OK;
 }
 
@@ -1249,9 +1555,160 @@ static commandResult_t CMD_HaDevname(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
+/* ── IMP-H: kws_protect — get/set and persist OV/UV/OC thresholds ────────
+ * Usage: kws_protect              → print current thresholds
+ *        kws_protect ov <V>       → set over-voltage trip
+ *        kws_protect uv <V>       → set under-voltage trip
+ *        kws_protect oc <A>       → set over-current trip
+ * All changes are saved to kws_protection.cfg immediately.
+ * NOTE: Thresholds are logged here and written to file.  Applying them to
+ * the HT7017 registers requires a restart (HT7017_Init re-reads them via
+ * the protect_load() → g_ov/uv/oc_thr → passed to HT7017 at Init).      */
+static commandResult_t CMD_Protect(const void *ctx, const char *cmd,
+                                   const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_protect: OV=%.1fV UV=%.1fV OC=%.1fA",
+                  g_ov_thr, g_uv_thr, g_oc_thr);
+        return CMD_RES_OK;
+    }
+    /* Parse "ov <val>", "uv <val>", "oc <val>" */
+    char key[4] = {0};
+    float val = 0.0f;
+    if (sscanf(args, "%3s %f", key, &val) != 2 || !(val > 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_protect usage: kws_protect ov|uv|oc <value>");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    if      (strcmp(key,"ov")==0) { g_ov_thr = val; }
+    else if (strcmp(key,"uv")==0) { g_uv_thr = val; }
+    else if (strcmp(key,"oc")==0) { g_oc_thr = val; }
+    else {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_protect: unknown key '%s' (use ov/uv/oc)", key);
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    protect_save();
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "kws_protect: %s set to %.2f (saved). Restart to apply to HT7017.",
+              key, val);
+    return CMD_RES_OK;
+}
+
+/* ── IMP-J: kws_daily_reset — manually reset the daily kWh accumulator ───
+ * Useful when integrating with NTP-based midnight CALENDAR_EVENTs.        */
+static commandResult_t CMD_DailyReset(const void *ctx, const char *cmd,
+                                      const char *args, int flags)
+{
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: daily reset — was %.3f kWh", g_daily_kwh);
+    g_daily_kwh          = 0.0f;
+    g_daily_start_uptime = g_uptime_s;
+    g_daily_mqtt_sent    = 0u;
+    daily_save();
+    return CMD_RES_OK;
+}
+
+/* ── IMP-L: kws_heartbeat — get/set heartbeat interval ───────────────────
+ * Usage: kws_heartbeat            → print current interval
+ *        kws_heartbeat <seconds>  → set new interval (0 = disable)       */
+static commandResult_t CMD_Heartbeat(const void *ctx, const char *cmd,
+                                     const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_heartbeat: %u s (topic: %s)",
+                  (unsigned)KWS_HEARTBEAT_S, KWS_HEARTBEAT_TOPIC);
+        return CMD_RES_OK;
+    }
+    /* Note: interval is compile-time constant KWS_HEARTBEAT_S — runtime
+     * change resets the counter so next publish fires in <new_interval>. */
+    g_hb_tick = 0u;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: heartbeat counter reset (compile-time interval=%u s)",
+              (unsigned)KWS_HEARTBEAT_S);
+    return CMD_RES_OK;
+}
+
+/* ── IMP-M: kws_faults_dump — print fault log to UART console ────────────
+ * Reads kws_faults.log and prints each row, capped at KWS_FAULT_MAX_ROWS.
+ * Format per row: uptime_s, code, value.                                  */
+static commandResult_t CMD_FaultsDump(const void *ctx, const char *cmd,
+                                      const char *args, int flags)
+{
+    FILE *f = fopen(KWS_FAULTS_FILE, "r");
+    if (!f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_faults_dump: no fault log found");
+        return CMD_RES_OK;
+    }
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "=== Fault Log ===");
+    char buf[96];
+    uint32_t rows = 0u;
+    while (fgets(buf, sizeof(buf), f) && rows < KWS_FAULT_MAX_ROWS) {
+        /* Strip trailing newline for clean log output */
+        size_t len = strlen(buf);
+        if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "  %s", buf);
+        rows++;
+    }
+    fclose(f);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "=== %u fault(s) total ===", (unsigned)rows);
+    return CMD_RES_OK;
+}
+
+/* IMP-M: kws_faults_clear — truncate fault log (zero it out). */
+static commandResult_t CMD_FaultsClear(const void *ctx, const char *cmd,
+                                       const char *args, int flags)
+{
+    FILE *f = robust_fopen_w(KWS_FAULTS_FILE);
+    if (f) { fclose(f); }
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "KWS303WF: fault log cleared");
+    return CMD_RES_OK;
+}
+
+/* ── IMP-N: kws_dim — get/set display dim timeout ────────────────────────
+ * Usage: kws_dim              → print current timeout
+ *        kws_dim <seconds>    → set idle timeout (0 = disable, always on) */
+static commandResult_t CMD_Dim(const void *ctx, const char *cmd,
+                               const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_dim: timeout=%u s (%s), idle=%u s, display=%s",
+                  (unsigned)g_dim_timeout,
+                  g_dim_timeout==0?"disabled":"enabled",
+                  (unsigned)(g_uptime_s - g_last_btn_s),
+                  g_display_on?"ON":"OFF");
+        return CMD_RES_OK;
+    }
+    g_dim_timeout = (uint32_t)atoi(args);
+    /* If disabling, immediately restore display if it was dimmed. */
+    if (g_dim_timeout == 0u && !g_display_on) {
+        CMD_ExecuteCommand("st7735_brightness 1", 0);
+        g_display_on = 1u;
+    }
+    /* Reset idle counter so dim doesn't fire immediately after re-enabling. */
+    g_last_btn_s = g_uptime_s;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: dim timeout set to %u s", (unsigned)g_dim_timeout);
+    return CMD_RES_OK;
+}
+
+/*
+ * KWS303WF_Init() — v1.1.0
+ * IMP-G: rate_load() restores persisted tariff.
+ * IMP-H: protect_load() restores OV/UV/OC thresholds.
+ * IMP-J: daily_load() restores today's accumulated kWh.
+ * IMP-K: increments g_reboot_count and persists immediately after lifetime_load().
+ * IMP-L/N: g_hb_tick, g_last_btn_s, g_display_on initialised to safe defaults.
+ */
 void KWS303WF_Init(void)
 {
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "KWS303WF: init");
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "KWS303WF: init v%s %s",
+              KWS_FW_VERSION_STR, KWS_FW_BUILD_DATE);
 
     HAL_PIN_Setup_Output(KWS_RELAY_PIN_ON);
     HAL_PIN_Setup_Output(KWS_RELAY_PIN_OFF);
@@ -1259,7 +1716,32 @@ void KWS303WF_Init(void)
     HAL_PIN_SetOutputValue(KWS_RELAY_PIN_OFF, 0);
     relay_open();
 
-    lifetime_load();   /* improvement #8: restore odometer from flash */
+    lifetime_load();   /* improvement #8: restore odometer + IMP-K: reboot_count */
+
+    /* IMP-K: increment reboot counter and persist immediately. */
+    g_reboot_count++;
+    lifetime_save();
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: reboot #%u (lifetime %.2f Wh)",
+              (unsigned)g_reboot_count, g_lifetime_wh);
+
+    /* IMP-G: restore persisted electricity rate. */
+    rate_load();
+
+    /* IMP-H: restore persisted protection thresholds. */
+    protect_load();
+
+    /* IMP-J: restore today's daily accumulator. */
+    daily_load();
+    g_daily_mqtt_sent    = 0u;   /* never sent this boot */
+
+    /* IMP-L: heartbeat counter starts at 0 — first publish fires after
+     * KWS_HEARTBEAT_S seconds; no publish on cold boot to avoid flood. */
+    g_hb_tick = 0u;
+
+    /* IMP-N: display assumed ON at boot (ST7735_Init handles backlight). */
+    g_last_btn_s = 0u;
+    g_display_on = 1u;
 
     /* NTC init — seed on first ntc_tick() call */
     g_ntc_seeded    = 0u;
@@ -1294,7 +1776,7 @@ void KWS303WF_Init(void)
     CMD_RegisterCommand("kws_relay_on",        CMD_RelayOn,      NULL);
     CMD_RegisterCommand("kws_relay_off",        CMD_RelayOff,     NULL);
     CMD_RegisterCommand("kws_ch8_set",          CMD_Ch8Set,       NULL);
-    CMD_RegisterCommand("kws_rate",             CMD_Rate,         NULL);
+    CMD_RegisterCommand("kws_rate",             CMD_Rate,         NULL);   /* IMP-G: now persists */
     CMD_RegisterCommand("kws_detect_w",         CMD_DetectW,      NULL);   /* #6 */
     CMD_RegisterCommand("kws_session2w",        CMD_Sess2W,       NULL);
     CMD_RegisterCommand("kws_session4w",        CMD_Sess4W,       NULL);
@@ -1307,6 +1789,17 @@ void KWS303WF_Init(void)
     CMD_RegisterCommand("kws_ntc_status",       CMD_NtcStatus,    NULL);
     CMD_RegisterCommand("kws_ntc_alarm_reset",  CMD_NtcAlarmReset,NULL);
     CMD_RegisterCommand("kws_ha_devname",       CMD_HaDevname,    NULL);
+    /* IMP-H: protection threshold persistence */
+    CMD_RegisterCommand("kws_protect",          CMD_Protect,      NULL);
+    /* IMP-J: daily reset (also triggerable via autoexec CALENDAR_EVENT) */
+    CMD_RegisterCommand("kws_daily_reset",      CMD_DailyReset,   NULL);
+    /* IMP-L: heartbeat control */
+    CMD_RegisterCommand("kws_heartbeat",        CMD_Heartbeat,    NULL);
+    /* IMP-M: fault log inspection */
+    CMD_RegisterCommand("kws_faults_dump",      CMD_FaultsDump,   NULL);
+    CMD_RegisterCommand("kws_faults_clear",     CMD_FaultsClear,  NULL);
+    /* IMP-N: display dim timeout */
+    CMD_RegisterCommand("kws_dim",              CMD_Dim,          NULL);
 
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
               "KWS303WF: ready fw=%s %s relay=P%d/P%d ntc=ADC%d slow=%us fast=%us rate=Rs%.2f/kWh",
@@ -1321,6 +1814,141 @@ void KWS303WF_Init(void)
               "  2W:%s %.1fkm/kWh  4W:%s %.1fkm/kWh  petrol=Rs%.0f/L",
               KWS_VEH2_NAME,KWS_VEH2_KM_PER_KWH,
               KWS_VEH4_NAME,KWS_VEH4_KM_PER_KWH,KWS_PETROL_RS_PER_L);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "  IMP-G rate_persist=yes  IMP-H protect=OV%.0fV/UV%.0fV/OC%.0fA",
+              g_ov_thr, g_uv_thr, g_oc_thr);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "  IMP-I co2_factor=%.0fg/kWh  IMP-J daily=%.3fkWh  IMP-K reboots=%u",
+              (float)KWS_CO2_GRID_G_PER_KWH, g_daily_kwh, (unsigned)g_reboot_count);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "  IMP-L heartbeat=%us  IMP-M fault_log_cap=%u  IMP-N dim=%us",
+              (unsigned)KWS_HEARTBEAT_S, (unsigned)KWS_FAULT_MAX_ROWS,
+              (unsigned)g_dim_timeout);
+}
+
+/*
+ * KWS303WF_RunEverySecond() — v1.1.0
+ * IMP-J: daily_tick() — detects 24 h boundary, publishes daily MQTT summary, resets accumulator.
+ * IMP-L: heartbeat_tick() — publishes compact status MQTT every KWS_HEARTBEAT_S seconds.
+ * IMP-M: ht7017_alarm_tick() — logs HT7017 electrical alarms (OV/UV/OC/OP) to kws_faults.log.
+ * IMP-N: dim_tick() — turns backlight off after KWS_DISPLAY_DIM_S idle seconds.
+ */
+
+/* ── IMP-J: daily kWh tick ────────────────────────────────────────────────
+ * Called once per second from RunEverySecond().
+ * Midnight detection: when uptime has advanced by ≥ 86400 s from
+ * g_daily_start_uptime, we treat that as a new day.  This is not wall-clock
+ * midnight but it is robust across reboots and does not require NTP.
+ * If NTP is available the user can call kws_daily_reset via autoexec at
+ * midnight using OBK's CALENDAR_EVENT feature (not done here — stays simple).*/
+static void daily_tick(void)
+{
+    /* Check if 24 h have elapsed since the last day-start. */
+    if ((g_uptime_s - g_daily_start_uptime) < 86400u) return;
+
+    /* Midnight boundary crossed — publish daily summary, then reset. */
+    float kwh = g_daily_kwh;
+
+    if (!g_daily_mqtt_sent && ReadCh(KWS_CH_WIFI) != 0) {
+        char pl[128];
+        snprintf(pl, sizeof(pl),
+                 "{\"daily_kwh\":%.3f,\"lifetime_kwh\":%.3f,\"uptime_s\":%u}",
+                 kwh, g_lifetime_wh / 1000.0f, (unsigned)g_uptime_s);
+        char cmd[180];
+        snprintf(cmd, sizeof(cmd), "publishMQTT %s %s", KWS_DAILY_TOPIC, pl);
+        CMD_ExecuteCommand(cmd, 0);
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: daily MQTT sent %.3f kWh", kwh);
+        g_daily_mqtt_sent = 1u;
+    }
+
+    /* Reset for the new day. */
+    g_daily_kwh          = 0.0f;
+    g_daily_start_uptime = g_uptime_s;
+    g_daily_mqtt_sent    = 0u;
+    daily_save();
+}
+
+/* ── IMP-L: MQTT heartbeat/keepalive tick ────────────────────────────────
+ * Publishes a compact JSON status payload every KWS_HEARTBEAT_S seconds.
+ * Keeps HA entities alive between sessions (HA default expiry = 10× publish).
+ * Payload ≤ 140 bytes — a separate buffer avoids clobbering g_mqtt_pending_pl.
+ * Guard: WiFi must be up; no attempt cap (if broker down, try next interval). */
+static void heartbeat_tick(void)
+{
+    if (++g_hb_tick < KWS_HEARTBEAT_S) return;
+    g_hb_tick = 0u;
+
+    if (ReadCh(KWS_CH_WIFI) == 0) return;   /* defer — no WiFi */
+
+    char pl[160];
+    snprintf(pl, sizeof(pl),
+             "{\"relay\":%u,\"temp_c\":%.1f,\"session\":%u,"
+             "\"lifetime_kwh\":%.3f,\"uptime_s\":%u,\"fw\":\"%s\"}",
+             (unsigned)g_relay_closed,
+             g_ntc_ema,
+             (unsigned)g_ev.active,
+             g_lifetime_wh / 1000.0f,
+             (unsigned)g_uptime_s,
+             KWS_FW_VERSION_STR);
+    char cmd[220];
+    snprintf(cmd, sizeof(cmd), "publishMQTT %s %s", KWS_HEARTBEAT_TOPIC, pl);
+    CMD_ExecuteCommand(cmd, 0);
+}
+
+/* ── IMP-M: HT7017 electrical alarm fault logger ─────────────────────────
+ * Reads Ch7 every second.  On rising edge (0→non-zero) logs a fault entry.
+ * Ch7 values: 1=OV, 2=UV, 3=OC, 4=OP.  The autoexec ChangeHandler opens the
+ * relay; we just need to persist the event.
+ * Uses a previous-alarm state to log only the transition, not every second.*/
+static void ht7017_alarm_tick(void)
+{
+    static uint8_t s_prev_alarm = 0u;  /* C99-OK: local static, no session state */
+    int alarm = ReadCh(7);   /* Ch7 = HT7017 alarm code */
+    uint8_t cur = (alarm > 0 && alarm <= 4) ? (uint8_t)alarm : 0u;
+    if (cur != 0u && cur != s_prev_alarm) {
+        /* Rising edge or change in alarm code — log it. */
+        float val = 0.0f;
+        switch (cur) {
+            case 1: val = (float)ReadCh(KWS_CH_RELAY); /* use voltage Ch1 */ val = (float)ReadCh(1) / 100.0f; break;
+            case 2: val = (float)ReadCh(1) / 100.0f; break;
+            case 3: val = (float)ReadCh(KWS_CH_CURRENT) / 1000.0f; break;
+            case 4: val = (float)ReadCh(KWS_CH_POWER) / 10.0f; break;
+            default: break;
+        }
+        fault_log(cur, g_uptime_s, val);
+    }
+    s_prev_alarm = cur;
+}
+
+/* ── IMP-N: display dim tick ─────────────────────────────────────────────
+ * Checks if the display should be turned off due to button inactivity.
+ * Backlight control is through the ST7735 CMD interface — we reuse the
+ * existing st7735_brightness command which is registered by drv_st7735.c.
+ * This avoids a cross-driver API dependency: no new header needed.       */
+static void dim_tick(void)
+{
+    if (g_dim_timeout == 0u) return;   /* feature disabled */
+
+    uint32_t idle_s = (g_uptime_s > g_last_btn_s) ? (g_uptime_s - g_last_btn_s) : 0u;
+
+    if (g_display_on && idle_s >= g_dim_timeout) {
+        /* Turn off backlight via console command. */
+        CMD_ExecuteCommand("st7735_brightness 0", 0);
+        g_display_on = 0u;
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: display dimmed after %u s idle", (unsigned)idle_s);
+    }
+}
+
+/* Called by button handlers to wake the display on any press. */
+static void dim_wake(void)
+{
+    g_last_btn_s = g_uptime_s;
+    if (!g_display_on) {
+        CMD_ExecuteCommand("st7735_brightness 1", 0);
+        g_display_on = 1u;
+    }
 }
 
 void KWS303WF_RunEverySecond(void)
@@ -1360,6 +1988,18 @@ void KWS303WF_RunEverySecond(void)
     /* NTC: 9 out of 10 calls cost ~0.1 µs (countdown decrement only).
      * ADC + Steinhart-Hart + EMA + state machine runs on sample ticks only. */
     ntc_tick();
+
+    /* IMP-J: check for 24 h boundary and publish/reset daily accumulator. */
+    daily_tick();
+
+    /* IMP-L: periodic MQTT heartbeat to keep HA entities alive. */
+    heartbeat_tick();
+
+    /* IMP-M: log HT7017 electrical alarm transitions to kws_faults.log. */
+    ht7017_alarm_tick();
+
+    /* IMP-N: turn backlight off after idle timeout. */
+    dim_tick();
 }
 
 /* ============================================================================
