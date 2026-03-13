@@ -232,6 +232,20 @@ static FILE *robust_fopen_w(const char *path)
  * preventing unbounded flash growth.  Adjustable here at compile time.     */
 #define KWS_HISTORY_MAX_ROWS  200u
 
+static uint32_t g_sess_sv = 0;
+
+static float     g_rate_rs = KWS_EV_RATE_DEFAULT;
+static bool      g_auto_en = true;
+
+typedef enum { AD_IDLE, AD_DETECTING, AD_CHARGING } AdState_t;
+static AdState_t g_ad     = AD_IDLE;
+static uint32_t  g_adTick = 0;
+static float     g_adWsum = 0.0f;
+static uint32_t  g_endTk  = 0;
+
+
+
+
 /* ============================================================================
  * SECTION B — CHANNEL HELPERS
  * ============================================================================ */
@@ -694,16 +708,7 @@ static void btn_tick(void)
  * unnecessary flash write and leaving the timestamp 59 s ahead of the session
  * start.  Promoted to file scope and reset in sess_start() so the 60-second
  * save period always begins fresh with each new session.                     */
-static uint32_t g_sess_sv = 0;
 
-static float     g_rate_rs = KWS_EV_RATE_DEFAULT;
-static bool      g_auto_en = true;
-
-typedef enum { AD_IDLE, AD_DETECTING, AD_CHARGING } AdState_t;
-static AdState_t g_ad     = AD_IDLE;
-static uint32_t  g_adTick = 0;
-static float     g_adWsum = 0.0f;
-static uint32_t  g_endTk  = 0;
 /* FIX-UX3: set to 1 by relay_close() to use KWS_DETECT_S_FAST instead of
  * KWS_DETECT_S.  Cleared when AD_DETECTING exits (start, idle, or open). */
 static uint8_t   g_adFast = 0;
