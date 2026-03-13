@@ -53,10 +53,14 @@
  *   P7 = ON coil  (HAL pin 8) — pulse HIGH → contacts CLOSE
  *   P8 = OFF coil (HAL pin 7) — pulse HIGH → contacts OPEN
  *
- * ── RELAY ↔ SESSION LINK (FIX-UX1) ──────────────────────────────────────
- *   relay CLOSE → sess_start() fires automatically (timer starts with current)
- *   relay OPEN  → sess_end()   fires automatically (timer stops, cost locked)
- *   [+] SESSION button — does NOT toggle relay; restarts timer mid-charge
+ * ── RELAY ↔ SESSION LINK (FIX-UX1 + FIX-UX3) ───────────────────────────
+ *   relay CLOSE → arms AD_DETECTING with KWS_DETECT_S_FAST window (5 s).
+ *                 If load ≥ g_detect_w_min sustained for 5 s → sess_start().
+ *                 Normal load / standby (<500 W) → AD_IDLE, no session.
+ *   relay OPEN  → sess_end() fires immediately + AD_IDLE reset.
+ *   [+] SESSION button — if relay open: closes relay (arms detect window).
+ *                        If relay closed + no session: starts session now.
+ *                        If relay closed + session active: restarts timer.
  *   [-] VEHICLE button — cycles vehicle profile (2W↔4W)
  *
  * ── autoexec.bat ─────────────────────────────────────────────────────────
@@ -127,7 +131,14 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_VEH4_OLD_KMPL     12.0f
 #define KWS_PETROL_RS_PER_L  107.0f
 #define KWS_DETECT_W_MIN_DEFAULT 500.0f  /* runtime-adjustable via kws_detect_w */
+/* FIX-UX3: two-speed confirmation window.
+ * KWS_DETECT_S      — 30 s window for auto-detect from AD_IDLE (background).
+ * KWS_DETECT_S_FAST — 5 s window triggered immediately after relay_close().
+ *   The relay close IS the user's intent — confirm load type quickly and start
+ *   the session without a 30 s dead zone.  Normal appliances (<g_detect_w_min)
+ *   fail the threshold in tick 1 and the state returns to AD_IDLE, no session. */
 #define KWS_DETECT_S          30
+#define KWS_DETECT_S_FAST      5
 #define KWS_END_S             60
 #define KWS_SPLIT_W         4500.0f
 #define KWS_RELAY_PIN_ON      8
@@ -315,7 +326,9 @@ static uint8_t  g_pulse_pin    = 0;
 static uint32_t g_pulse_off_at = 0;
 
 /* Forward declarations — sess_start/sess_end are defined in SECTION F but
- * called from relay_close/relay_open (FIX-UX1) which are in SECTION C.     */
+ * referenced in SECTION C and G.
+ * relay_open() calls sess_end() (FIX-UX1).
+ * on_session() calls sess_start() and sess_end() (FIX-UX3).               */
 static void sess_start(uint8_t veh);
 static void sess_end(void);
 
@@ -348,6 +361,12 @@ static void relay_open(void)
     /* FIX-UX1: auto-end session when relay opens so timer and cost stop
      * immediately.  If already idle this is a no-op (sess_end guards active). */
     if (g_ev.active) sess_end();
+    /* FIX-UX3: relay is open — nothing can be detected.  Reset detector so
+     * stale AD_DETECTING/AD_CHARGING state does not carry over when the relay
+     * is re-closed later.  g_adFast cleared to prevent a stale fast window.   */
+    g_ad     = AD_IDLE;
+    g_adFast = 0;
+    g_endTk  = 0;
 }
 
 static void relay_close(void)
@@ -358,15 +377,32 @@ static void relay_close(void)
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
               "KWS303WF: Relay CLOSE (HAL%d→GPIO-P7 ON-coil pulsed, load ON)",
               KWS_RELAY_PIN_ON);
-    /* FIX-UX1: auto-start session when relay closes so the timer tracks charge
-     * time from the moment current can flow.  g_preferred_veh honours any [-]
-     * button pre-selection; falls back to 2W default.
-     * If a session is already active (e.g. relay_sync from Ch8 write) leave it
-     * running — don't reset the timer mid-charge. */
-    if (!g_ev.active) {
-        uint8_t veh = (g_preferred_veh != KWS_VEH_NONE) ? g_preferred_veh
-                                                         : KWS_VEH_2W;
-        sess_start(veh);
+    /* FIX-UX3: arm fast detection window instead of starting session immediately.
+     *
+     * Previous FIX-UX1 called sess_start() here unconditionally, which started
+     * a session for ANY load (phone charger, lamp, etc.) the moment the relay
+     * closed.  The correct behaviour is:
+     *   • Arm AD_DETECTING with a 5 s fast-confirm window.
+     *   • If load ≥ g_detect_w_min for 5 consecutive seconds → sess_start().
+     *   • If load < g_detect_w_min (normal appliance) → AD_IDLE, no session.
+     *
+     * The 5 s window (KWS_DETECT_S_FAST) is short enough that the user sees
+     * "CHG" and the timer start within 5 s of plugging in the EV, yet long
+     * enough to absorb HT7017 UART first-report latency (~1–2 s).
+     *
+     * Only arm if auto-detect is enabled.  If auto is off, the user must press
+     * [+] SESSION or use kws_session2w / kws_session4w manually.
+     * If a session is already active (resumed from flash), leave it — relay_sync
+     * can call relay_close() when Ch8 is 100 but we must not disturb a live
+     * session on every RunEverySecond tick.                                    */
+    if (g_auto_en && !g_ev.active) {
+        g_ad     = AD_DETECTING;
+        g_adTick = 0;
+        g_adWsum = 0.0f;
+        g_adFast = 1;
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: auto-detect armed (%ds fast window, threshold=%.0fW)",
+                  KWS_DETECT_S_FAST, g_detect_w_min);
     }
 }
 
@@ -668,6 +704,9 @@ static AdState_t g_ad     = AD_IDLE;
 static uint32_t  g_adTick = 0;
 static float     g_adWsum = 0.0f;
 static uint32_t  g_endTk  = 0;
+/* FIX-UX3: set to 1 by relay_close() to use KWS_DETECT_S_FAST instead of
+ * KWS_DETECT_S.  Cleared when AD_DETECTING exits (start, idle, or open). */
+static uint8_t   g_adFast = 0;
 
 static void sess_save(void)
 {
@@ -907,32 +946,50 @@ static void sess_tick(void)
     if (!g_auto_en) return;
     switch (g_ad) {
     case AD_IDLE:
-        if (w >= g_detect_w_min) { g_ad=AD_DETECTING; g_adTick=1; g_adWsum=w; }
+        /* Background detection: only fires if relay is already closed and
+         * a load appears above threshold.  relay_close() arms AD_DETECTING
+         * directly, so this case mainly handles loads that ramp up slowly
+         * after the relay has been closed for a while.                    */
+        if (g_relay_closed && w >= g_detect_w_min) {
+            g_ad = AD_DETECTING; g_adTick = 1; g_adWsum = w; g_adFast = 0;
+        }
         break;
     case AD_DETECTING:
-        if (w < g_detect_w_min) { g_ad=AD_IDLE; break; }
+        if (w < g_detect_w_min) {
+            /* FIX-UX3: load below threshold — normal appliance or initial
+             * standby draw.  Return to IDLE.  g_adFast cleared so next
+             * relay_close() starts a fresh fast window.                   */
+            g_ad = AD_IDLE; g_adFast = 0;
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "KWS303WF: load below threshold (%.0fW < %.0fW) — no session started",
+                      w, g_detect_w_min);
+            break;
+        }
         g_adWsum += w;
-        if (++g_adTick >= KWS_DETECT_S) {
-            float avg = g_adWsum / (float)g_adTick;
-            if (!g_ev.active) {
-                /* BUG-10 FIX: use [-] button override if the user pre-selected
-                 * a vehicle while idle; otherwise fall back to watt threshold.
-                 * BUG-11 FIX: original BUG-10 patch placed a variable declaration
-                 * as the bare body of an if statement.  In C, a declaration is not
-                 * a statement; this is a compile error on C89 and a logic error on
-                 * C99 (sess_start would execute unconditionally regardless of the
-                 * g_ev.active guard).  Wrapped in braces to fix both issues. */
-                uint8_t veh = (g_preferred_veh != KWS_VEH_NONE)
-                              ? g_preferred_veh
-                              : ((avg < KWS_SPLIT_W) ? KWS_VEH_2W : KWS_VEH_4W);
-                sess_start(veh);
+        {
+            /* FIX-UX3: use fast window (5 s) when armed by relay_close(),
+             * standard window (30 s) for background auto-detect from AD_IDLE. */
+            uint32_t confirm_s = g_adFast ? (uint32_t)KWS_DETECT_S_FAST
+                                          : (uint32_t)KWS_DETECT_S;
+            if (++g_adTick >= confirm_s) {
+                float avg = g_adWsum / (float)g_adTick;
+                if (!g_ev.active) {
+                    uint8_t veh = (g_preferred_veh != KWS_VEH_NONE)
+                                  ? g_preferred_veh
+                                  : ((avg < KWS_SPLIT_W) ? KWS_VEH_2W : KWS_VEH_4W);
+                    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                              "KWS303WF: load confirmed (avg=%.0fW, %us window) → %s",
+                              avg, (unsigned)confirm_s,
+                              (veh==KWS_VEH_2W)?KWS_VEH2_NAME:KWS_VEH4_NAME);
+                    sess_start(veh);
+                }
+                g_ad = AD_CHARGING; g_adFast = 0; g_endTk = 0;
             }
-            g_ad=AD_CHARGING; g_endTk=0;
         }
         break;
     case AD_CHARGING:
         if (w < g_detect_w_min) { if (++g_endTk >= KWS_END_S) sess_end(); }
-        else { g_endTk=0; }
+        else { g_endTk = 0; }
         break;
     }
 }
@@ -940,24 +997,44 @@ static void sess_tick(void)
 /* ============================================================================
  * SECTION G — BUTTON CALLBACKS
  * ============================================================================ */
-/* FIX-UX1: on_toggle now implicitly starts/ends session because relay_close()
- * calls sess_start() and relay_open() calls sess_end().  No extra code needed. */
+/* FIX-UX3: on_toggle now implicitly starts/ends session via relay_close/open
+ * arming the detect window and relay_open calling sess_end().              */
 static void on_toggle(void)   { if (g_relay_closed) relay_open(); else relay_close(); }
 static void on_session(void)
 {
-    /* FIX-UX1: [+] SESSION button role is now "restart session timer" —
-     * it does NOT toggle the relay.  If relay is closed and a session is
-     * running, this ends the current session and immediately starts a fresh
-     * one (resetting the timer and energy offset) without interrupting power.
-     * If relay is open, it starts a session record without closing the relay
-     * (unusual, but allows manual session tracking independent of the relay).
-     * Vehicle selection: use active vehicle, or g_preferred_veh, or default 2W. */
+    /* FIX-UX3: [+] SESSION button semantics:
+     *
+     * Case 1 — Relay open, no session:
+     *   Close the relay.  This arms the fast detect window (5 s).  The user
+     *   pressing SESSION means "I want to charge now" — relay must be closed
+     *   for any current to flow.  Session starts automatically after confirm.
+     *
+     * Case 2 — Relay closed, session active:
+     *   Restart the session timer and energy offset without interrupting power.
+     *   Useful if user plugged vehicle mid-session or wants to reset the counter.
+     *
+     * Case 3 — Relay closed, no session (auto=off or load didn't qualify):
+     *   Force-start a session immediately.  The user has explicitly decided this
+     *   load should be tracked — bypass the detect threshold entirely.
+     *
+     * Vehicle selection: active vehicle → g_preferred_veh → default 2W.     */
+    if (!g_relay_closed) {
+        relay_close();   /* arms fast detect window — session starts after 5 s */
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: [+] relay closed — detect window armed");
+        return;
+    }
+    /* Relay is closed: restart or force-start */
     uint8_t veh = g_ev.active  ? g_ev.vehicle
                 : (g_preferred_veh != KWS_VEH_NONE) ? g_preferred_veh
                 : KWS_VEH_2W;
     if (g_ev.active) sess_end();
     sess_start(veh);
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: Session reset by [+] button");
+    /* Sync auto-detect state so sess_tick's AD_CHARGING path monitors end-of-charge */
+    g_ad = AD_CHARGING; g_adFast = 0; g_endTk = 0;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: [+] session force-started (veh=%s)",
+              (veh==KWS_VEH_2W)?KWS_VEH2_NAME:KWS_VEH4_NAME);
 }
 /* improvement #3 — [-] (P20) cycles vehicle profile.
  * Active session: ends current session and immediately restarts with the
@@ -1092,10 +1169,13 @@ static commandResult_t CMD_SessStat(const void*x,const char*c,const char*a,int f
               g_ev.seg_count,
               (unsigned)(elapsed/60), (unsigned)(elapsed%60));
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "  relay=%s  auto=%s  detect_w=%.0fW  uptime=%us  ntc_alarm=%s",
+              "  relay=%s  auto=%s  detect_w=%.0fW  ad_state=%s%s  uptime=%us  ntc_alarm=%s",
               g_relay_closed?"CLOSED":"OPEN",
               g_auto_en?"ON":"OFF",
-              g_detect_w_min, (unsigned)g_uptime_s,
+              g_detect_w_min,
+              g_ad==AD_IDLE?"IDLE":g_ad==AD_DETECTING?"DETECTING":"CHARGING",
+              g_adFast?" (fast)":"",
+              (unsigned)g_uptime_s,
               g_ntc_alarm?"LATCHED":"clear");
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
               "  lifetime_saved=%.2f Wh  lifetime_now=%.2f Wh  (%.4f kWh total)",
@@ -1105,8 +1185,14 @@ static commandResult_t CMD_SessStat(const void*x,const char*c,const char*a,int f
 
 static commandResult_t CMD_SessAuto(const void*x,const char*c,const char*a,int f)
 {
-    g_auto_en=!g_auto_en;
-    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,"KWS303WF: auto-detect %s",g_auto_en?"ON":"OFF");
+    g_auto_en = !g_auto_en;
+    if (!g_auto_en && g_ad != AD_CHARGING) {
+        /* FIX-UX3: turning auto off while detect window is pending — reset
+         * to IDLE.  If already AD_CHARGING a session is running; leave it.  */
+        g_ad = AD_IDLE; g_adFast = 0;
+    }
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: auto-detect %s", g_auto_en ? "ON" : "OFF");
     return CMD_RES_OK;
 }
 
@@ -1187,7 +1273,8 @@ void KWS303WF_Init(void)
         g_ev.seg_count++;
         g_ev.wh_offset = 0.0f;
         g_ev.wh_resume = 1;
-        g_ad = AD_CHARGING;
+        g_ad   = AD_CHARGING;   /* resumed session already confirmed */
+        g_adFast = 0;
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                   "KWS303WF: Session RESUMED id=%u segs=%u (offset deferred)",
                   g_ev.session_id, g_ev.seg_count);
