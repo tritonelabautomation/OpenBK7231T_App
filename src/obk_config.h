@@ -15,22 +15,16 @@
  * KWS_FW_BUILD_DATE   is set manually to the ISO date of the release commit.
  * ────────────────────────────────────────────────────────────────────────── */
 #define KWS_FW_VERSION_MAJOR  1
-#define KWS_FW_VERSION_MINOR  2              /* MINOR bump: new features batch IMP-O..R */
+#define KWS_FW_VERSION_MINOR  3              /* MINOR bump: new features batch IMP-S..V */
 #define KWS_FW_VERSION_PATCH  0
-/* IMP-G: rate persistence (kws_rate.cfg)
- * IMP-H: protection threshold persistence (kws_protection.cfg)
- * IMP-I: CO2 saved estimate in MQTT session payload
- * IMP-J: daily kWh summary + midnight MQTT publish (kws_daily.cfg)
- * IMP-K: reboot counter in kws_lifetime.cfg
- * IMP-L: MQTT keepalive/heartbeat publish every KWS_HEARTBEAT_S seconds
- * IMP-M: persistent fault log (kws_faults.log, last 20 faults)
- * IMP-O: NTP ISO-8601 timestamp in MQTT session payload (FG-09)
- * IMP-P: per-vehicle runtime efficiency factors (FG-10, kws_vehicles.cfg)
- * PERF-1 fix: history_append + fault_log row-count buffer [4]->[128]
- * IMP-Q: off-peak charge scheduling (FG-01, kws_schedule.cfg)
- * IMP-R: multi-tier time-of-use tariff (FG-02, extends kws_rate.cfg) */
-#define KWS_FW_VERSION_STR    "v1.2.0"
-#define KWS_FW_BUILD_DATE     "2026-03-13"   /* Pass 12 — IMP-O..R + PERF-1 fix */
+/* IMP-G..R: see v1.1.0 / v1.2.0 / v1.2.1 changelog
+ * IMP-S: NTP wall-clock midnight in daily_tick() (FG: GAP-3)
+ * IMP-T: live V/A/W/Hz readings in heartbeat MQTT payload (FG: GAP-1)
+ * IMP-U: PF + reactive/apparent power in session MQTT payload (FG: GAP-2)
+ * IMP-V: session lock via 3-second SESSION button hold (FG-03)
+ * BUG-21: dead first assignment in ht7017_alarm_tick() case 1 removed */
+#define KWS_FW_VERSION_STR    "v1.3.0"
+#define KWS_FW_BUILD_DATE     "2026-03-15"   /* Pass 14 — IMP-S..V + BUG-21 */
 
 #define OBK_VARIANT_DEFAULT						0
 #define OBK_VARIANT_BERRY						1
