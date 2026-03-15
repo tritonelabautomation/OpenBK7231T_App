@@ -15,7 +15,7 @@
  * KWS_FW_BUILD_DATE   is set manually to the ISO date of the release commit.
  * ────────────────────────────────────────────────────────────────────────── */
 #define KWS_FW_VERSION_MAJOR  1
-#define KWS_FW_VERSION_MINOR  1              /* MINOR bump: new features batch IMP-G..N */
+#define KWS_FW_VERSION_MINOR  2              /* MINOR bump: new features batch IMP-O..R */
 #define KWS_FW_VERSION_PATCH  0
 /* IMP-G: rate persistence (kws_rate.cfg)
  * IMP-H: protection threshold persistence (kws_protection.cfg)
@@ -24,9 +24,13 @@
  * IMP-K: reboot counter in kws_lifetime.cfg
  * IMP-L: MQTT keepalive/heartbeat publish every KWS_HEARTBEAT_S seconds
  * IMP-M: persistent fault log (kws_faults.log, last 20 faults)
- * IMP-N: display dim/sleep after KWS_DISPLAY_DIM_S seconds idle */
-#define KWS_FW_VERSION_STR    "v1.1.0"
-#define KWS_FW_BUILD_DATE     "2026-03-13"   /* Pass 11 — IMP-G..N feature batch */
+ * IMP-O: NTP ISO-8601 timestamp in MQTT session payload (FG-09)
+ * IMP-P: per-vehicle runtime efficiency factors (FG-10, kws_vehicles.cfg)
+ * PERF-1 fix: history_append + fault_log row-count buffer [4]->[128]
+ * IMP-Q: off-peak charge scheduling (FG-01, kws_schedule.cfg)
+ * IMP-R: multi-tier time-of-use tariff (FG-02, extends kws_rate.cfg) */
+#define KWS_FW_VERSION_STR    "v1.2.0"
+#define KWS_FW_BUILD_DATE     "2026-03-13"   /* Pass 12 — IMP-O..R + PERF-1 fix */
 
 #define OBK_VARIANT_DEFAULT						0
 #define OBK_VARIANT_BERRY						1
