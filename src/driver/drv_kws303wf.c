@@ -1399,6 +1399,9 @@ static void sess_mqtt(void)
             snprintf(ts_buf, sizeof(ts_buf), "null");
         }
     }
+#else
+    snprintf(ts_buf, sizeof(ts_buf), "null");
+#endif /* ENABLE_NTP */
 
     snprintf(g_mqtt_pending_pl, sizeof(g_mqtt_pending_pl),
              "{\"vehicle\":\"%s\",\"kwh\":%.3f,\"cost_rs\":%.2f,"
