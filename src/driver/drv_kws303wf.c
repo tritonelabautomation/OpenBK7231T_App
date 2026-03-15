@@ -103,7 +103,7 @@
  * Guarded by ENABLE_NTP which is set for PLATFORM_BEKEN in obk_config.h.
  * If NTP is not synced, sess_mqtt() falls back to "uptime_s" field only.   */
 #ifdef ENABLE_NTP
-#include "../driver/drv_ntp.h"
+#include "drv_ntp.h"
 #endif
 
 #ifndef LOG_FEATURE_ENERGY
