@@ -1,5 +1,5 @@
 /*
- * drv_kws303wf.c — KWS-303WF Device Application Driver for OpenBK7231N
+ * drv_kws303wf.c - KWS-303WF Device Application Driver for OpenBK7231N
  * Version : see KWS_FW_VERSION_STR / KWS_FW_BUILD_DATE in obk_config.h
  *
  * SINGLE RESPONSIBILITY: Device-specific hardware & EV session application.
@@ -8,80 +8,80 @@
  *
  * startDriver KWS303WF
  *
- * ── CHANNEL OUTPUT ────────────────────────────────────────────────────────
+ * -- CHANNEL OUTPUT --------------------------------------------------------
  *   Ch 8  = Relay state      (0=open/safe, 100=closed/on)
  *   Ch 9  = Temperature      (degrees-C x 100, e.g. 2716 = 27.16 C)
  *   Ch 10 = EV session cost  (Rs x 100, e.g. 376 = Rs 3.76)
- *   Ch 12 = Session active   (0=idle, 1=active) — read by drv_st7735 for
+ *   Ch 12 = Session active   (0=idle, 1=active) - read by drv_st7735 for
  *                             status bar colour and timer source selection
  *   Ch 13 = Session elapsed  (seconds since sess_start, resets at sess_end)
- *                             — display shows H:MM:SS; MQTT uses duration_s
+ *                             - display shows H:MM:SS; MQTT uses duration_s
  *   Ch 14 = NTC thermal alarm (0=normal, 1=alarm latched/relay opened)
- *                             — read by drv_st7735 to colour temp red + "THM"
+ *                             - read by drv_st7735 to colour temp red + "THM"
  *
- * ── CHANNEL INPUT ─────────────────────────────────────────────────────────
+ * -- CHANNEL INPUT ---------------------------------------------------------
  *   Ch 3  = Power  (W x 10)     from drv_ht7017
  *   Ch 2  = Current (A x 1000)  from drv_ht7017
  *   Ch 6  = Energy (Wh x 10)    from drv_ht7017
  *   Ch 8  = Relay state (read back to react to external writes)
  *
- * ── NTC TEMPERATURE  (v2 — NASA three-layer adaptive sampling) ───────────
+ * -- NTC TEMPERATURE  (v2 - NASA three-layer adaptive sampling) -----------
  *   Hardware: External 10k NTC probe on long cable (image-verified).
- *             P23/ADC ch3. B=3950, R25=10k, Rs=10k, Vcc→NTC→pin→Rs→GND.
+ *             P23/ADC ch3. B=3950, R25=10k, Rs=10k, Vcc->NTC->pin->Rs->GND.
  *
  *   SCIENTIFIC BASIS
- *   ────────────────
- *   External probe NTC thermal time constant τ ≈ 60-300 s (cable/surface).
- *   Nyquist limit: f_useful < 1/(2×60) = 0.0083 Hz → sample every 120 s.
- *   Original 1 Hz = 120× oversampling. Saves ~90% ADC/logf/CMD dispatches.
+ *   ----------------
+ *   External probe NTC thermal time constant tau ~= 60-300 s (cable/surface).
+ *   Nyquist limit: f_useful < 1/(2x60) = 0.0083 Hz -> sample every 120 s.
+ *   Original 1 Hz = 120x oversampling. Saves ~90% ADC/logf/CMD dispatches.
  *
  *   THREE-LAYER FDIR (ECSS-E-ST-70-41C / JPL DSN 810-005):
- *   ┌─ LAYER 3: ALARM  T ≥ NTC_ALARM_C  → relay_open(), latch FAST        ┐
- *   ├─ LAYER 2: FAST   |dT/dt| ≥ trigger OR T ≥ warn → 1 s poll          ┤
- *   └─ LAYER 1: SLOW   stable, T < warn, held ≥ min_ticks → 10 s poll    ┘
+ *   +- LAYER 3: ALARM  T >= NTC_ALARM_C  -> relay_open(), latch FAST        +
+ *   +- LAYER 2: FAST   |dT/dt| >= trigger OR T >= warn -> 1 s poll          +
+ *   +- LAYER 1: SLOW   stable, T < warn, held >= min_ticks -> 10 s poll    +
  *
- *   EMA FILTER: y = α·x + (1-α)·y_prev, α=1/N, O(1), zero heap.
- *   DEADBAND GATE: publish only if |T_ema - T_last_pub| ≥ 0.5 °C
+ *   EMA FILTER: y = alpha.x + (1-alpha).y_prev, alpha=1/N, O(1), zero heap.
+ *   DEADBAND GATE: publish only if |T_ema - T_last_pub| >= 0.5 degC
  *                  OR keepalive on SLOW tick.
  *
  *   SAVINGS:
- *     ADC reads    : 3600/hr → ~360/hr steady state  (−90%)
- *     logf() calls : 3600/hr → ~360/hr steady state  (−90%)
- *     PubCh calls  : 3600/hr → ~36/hr at 0.5°C/step (−99% in steady state)
+ *     ADC reads    : 3600/hr -> ~360/hr steady state  (?90%)
+ *     logf() calls : 3600/hr -> ~360/hr steady state  (?90%)
+ *     PubCh calls  : 3600/hr -> ~36/hr at 0.5degC/step (?99% in steady state)
  *
- * ── RELAY HARDWARE (KWS-303WF schematic-verified) ─────────────────────────
- *   P7 = ON coil  (HAL pin 8) — pulse HIGH → contacts CLOSE
- *   P8 = OFF coil (HAL pin 7) — pulse HIGH → contacts OPEN
+ * -- RELAY HARDWARE (KWS-303WF schematic-verified) -------------------------
+ *   P7 = ON coil  (HAL pin 8) - pulse HIGH -> contacts CLOSE
+ *   P8 = OFF coil (HAL pin 7) - pulse HIGH -> contacts OPEN
  *
- * ── RELAY ↔ SESSION LINK (FIX-UX1 + FIX-UX3) ───────────────────────────
- *   relay CLOSE → arms AD_DETECTING with KWS_DETECT_S_FAST window (5 s).
- *                 If load ≥ g_detect_w_min sustained for 5 s → sess_start().
- *                 Normal load / standby (<500 W) → AD_IDLE, no session.
- *   relay OPEN  → sess_end() fires immediately + AD_IDLE reset.
- *   [+] SESSION button — if relay open: closes relay (arms detect window).
+ * -- RELAY <-> SESSION LINK (FIX-UX1 + FIX-UX3) ---------------------------
+ *   relay CLOSE -> arms AD_DETECTING with KWS_DETECT_S_FAST window (5 s).
+ *                 If load >= g_detect_w_min sustained for 5 s -> sess_start().
+ *                 Normal load / standby (<500 W) -> AD_IDLE, no session.
+ *   relay OPEN  -> sess_end() fires immediately + AD_IDLE reset.
+ *   [+] SESSION button - if relay open: closes relay (arms detect window).
  *                        If relay closed + no session: starts session now.
  *                        If relay closed + session active: restarts timer.
- *   [-] VEHICLE button — cycles vehicle profile (2W↔4W)
+ *   [-] VEHICLE button - cycles vehicle profile (2W<->4W)
  *
- * ── autoexec.bat ─────────────────────────────────────────────────────────
+ * -- autoexec.bat ---------------------------------------------------------
  *   startDriver HT7017
  *   startDriver ST7735 14 16 9 17 15 24
  *   startDriver KWS303WF
  *   AddChangeHandler Channel7 != 0 kws_ch8_set 0
  *   AddChangeHandler Channel7 == 0 kws_ch8_set 100
  *
- * ── New channels (set in autoexec.bat) ────────────────────────────────────
+ * -- New channels (set in autoexec.bat) ------------------------------------
  *   setChannelType 12 ReadOnly   (session active flag)
  *   setChannelType 13 ReadOnly   (session elapsed seconds)
  *   setChannelType 14 ReadOnly   (NTC thermal alarm latch)
  *
- * ── New console commands ───────────────────────────────────────────────────
- *   kws_detect_w [W]        — get/set auto-detect power threshold (default 500W)
- *   kws_history_dump        — print session history CSV to UART log
- *   kws_history_clear       — truncate kws_history.csv
- *   kws_lifetime [Wh]       — get/set lifetime energy odometer
- *   kws_session_stat        — shows elapsed time, detect_w, lifetime_now
- *   [-] button (P20)        — cycles vehicle profile (2W↔4W) at any time
+ * -- New console commands ---------------------------------------------------
+ *   kws_detect_w [W]        - get/set auto-detect power threshold (default 500W)
+ *   kws_history_dump        - print session history CSV to UART log
+ *   kws_history_clear       - truncate kws_history.csv
+ *   kws_lifetime [Wh]       - get/set lifetime energy odometer
+ *   kws_session_stat        - shows elapsed time, detect_w, lifetime_now
+ *   [-] button (P20)        - cycles vehicle profile (2W<->4W) at any time
  */
 
 #include "../obk_config.h"
@@ -99,7 +99,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdbool.h>
-/* IMP-O: OBK NTP driver — provides NTP_IsSynced(), NTP_GetHour/Min/Sec/Day/Month/Year().
+/* IMP-O: OBK NTP driver - provides NTP_IsSynced(), NTP_GetHour/Min/Sec/Day/Month/Year().
  * Guarded by ENABLE_NTP which is set for PLATFORM_BEKEN in obk_config.h.
  * If NTP is not synced, sess_mqtt() falls back to "uptime_s" field only.   */
 #ifdef ENABLE_NTP
@@ -110,12 +110,12 @@
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
 #endif
 
-/* ── LittleFS fopen("w") quirk on BK7231N ────────────────────────────────────
+/* -- LittleFS fopen("w") quirk on BK7231N ------------------------------------
  * fopen(path,"w") returns NULL when the file does not yet exist.
  * fopen(path,"a") creates it.  robust_fopen_w() tries "w" first; on failure
  * it touches the file with "a" then retries "w".  See drv_ht7017.c for the
  * full root-cause note (confirmed 2026-03-06).
- * ──────────────────────────────────────────────────────────────────────────── */
+ * ---------------------------------------------------------------------------- */
 static FILE *robust_fopen_w(const char *path)
 {
     FILE *f = fopen(path, "w");
@@ -126,7 +126,7 @@ static FILE *robust_fopen_w(const char *path)
 }
 
 /* ============================================================================
- * SECTION A — CONFIGURATION
+ * SECTION A - CONFIGURATION
  * ============================================================================ */
 #define KWS_EV_RATE_DEFAULT   7.00f
 #define KWS_VEH2_NAME         "Ather Rizta Z"
@@ -138,9 +138,9 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_PETROL_RS_PER_L  107.0f
 #define KWS_DETECT_W_MIN_DEFAULT 500.0f  /* runtime-adjustable via kws_detect_w */
 /* FIX-UX3: two-speed confirmation window.
- * KWS_DETECT_S      — 30 s window for auto-detect from AD_IDLE (background).
- * KWS_DETECT_S_FAST — 5 s window triggered immediately after relay_close().
- *   The relay close IS the user's intent — confirm load type quickly and start
+ * KWS_DETECT_S      - 30 s window for auto-detect from AD_IDLE (background).
+ * KWS_DETECT_S_FAST - 5 s window triggered immediately after relay_close().
+ *   The relay close IS the user's intent - confirm load type quickly and start
  *   the session without a 30 s dead zone.  Normal appliances (<g_detect_w_min)
  *   fail the threshold in tick 1 and the state returns to AD_IDLE, no session. */
 #define KWS_DETECT_S          30
@@ -153,14 +153,14 @@ static FILE *robust_fopen_w(const char *path)
  * The actual pulse duration is 1 second (g_uptime_s + 1), enforced by
  * relay_pulse_tick() called from KWS303WF_RunQuickTick() (~10 ms tick).
  * g_pulse_off_at uses second-resolution g_uptime_s, so coil de-energises
- * within ~10 ms of the second boundary — well within the latching relay
- * minimum (≥100 ms).  De-energise overshoot improved from ≤1 s to ≤10 ms. */
-#define KWS_RELAY_PULSE_MS  200   /* reference only — actual pulse = 1 s via uptime tick */
+ * within ~10 ms of the second boundary - well within the latching relay
+ * minimum (>=100 ms).  De-energise overshoot improved from <=1 s to <=10 ms. */
+#define KWS_RELAY_PULSE_MS  200   /* reference only - actual pulse = 1 s via uptime tick */
 #define KWS_BTN_TOGGLE       28
 #define KWS_BTN_SESSION      26
 #define KWS_BTN_RESERVED     20
 
-/* ── NTC hardware ─────────────────────────────────────────────────────── */
+/* -- NTC hardware ------------------------------------------------------- */
 #define KWS_ADC_CH            23
 #define KWS_ADC_MAX        4095.0f
 #define KWS_NTC_R25       10000.0f
@@ -169,37 +169,37 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_NTC_T0K        298.15f
 #define KWS_NTC_PULLUP         1
 
-/* ── NTC adaptive sampling parameters ────────────────────────────────────
+/* -- NTC adaptive sampling parameters ------------------------------------
  *
  *  NTC_SLOW_PERIOD    Poll every N seconds in steady state.
- *                     Scientific minimum per Nyquist with τ≥60s: 30 s.
+ *                     Scientific minimum per Nyquist with tau>=60s: 30 s.
  *                     Set to 10 s for comfortable engineering margin.
  *
  *  NTC_FAST_PERIOD    Poll every N seconds during transient/alarm.
  *                     1 s = original rate, active only when needed.
  *
- *  NTC_FAST_TRIGGER_C |ΔT per sample| that switches to FAST mode.
- *                     At SLOW (10s interval): 1.0 °C/sample = 6 °C/min.
+ *  NTC_FAST_TRIGGER_C |deltaT per sample| that switches to FAST mode.
+ *                     At SLOW (10s interval): 1.0 degC/sample = 6 degC/min.
  *                     Detects charger cable heating events promptly.
  *
  *  NTC_DEADBAND_C     Minimum |T_ema - T_last_pub| to publish Ch9.
- *                     0.5 °C >> ADC noise floor (~0.16 °C at 27°C).
- *                     At 27 °C steady state: zero extra publishes per hour.
+ *                     0.5 degC >> ADC noise floor (~0.16 degC at 27degC).
+ *                     At 27 degC steady state: zero extra publishes per hour.
  *
  *  NTC_WARN_C         Pre-alarm threshold. Locks to FAST mode.
- *                     10 °C margin below hard alarm (PVC cable rated 70°C).
+ *                     10 degC margin below hard alarm (PVC cable rated 70degC).
  *
  *  NTC_ALARM_C        Hard safety limit. Opens relay immediately.
- *                     70 °C = PVC insulation temperature rating.
+ *                     70 degC = PVC insulation temperature rating.
  *
- *  NTC_EMA_N          EMA filter depth α = 1/N.
- *                     N=4: τ_ema ≈ 1.5 s @ 1 Hz fast, 15 s @ 0.1 Hz slow.
+ *  NTC_EMA_N          EMA filter depth alpha = 1/N.
+ *                     N=4: tau_ema ~= 1.5 s @ 1 Hz fast, 15 s @ 0.1 Hz slow.
  *                     Rejects ADC noise without meaningful response lag.
  *
  *  NTC_FAST_MIN_TICKS Minimum ticks to remain in FAST before returning
- *                     to SLOW. Prevents FAST↔SLOW chatter at the trigger
+ *                     to SLOW. Prevents FAST<->SLOW chatter at the trigger
  *                     boundary.
- * ─────────────────────────────────────────────────────────────────────── */
+ * ----------------------------------------------------------------------- */
 #define NTC_SLOW_PERIOD       10u
 #define NTC_FAST_PERIOD        1u
 #define NTC_FAST_TRIGGER_C   1.0f
@@ -209,59 +209,59 @@ static FILE *robust_fopen_w(const char *path)
 #define NTC_EMA_N              4u
 #define NTC_FAST_MIN_TICKS    15u
 
-/* ── OBK channels ─────────────────────────────────────────────────────── */
+/* -- OBK channels ------------------------------------------------------- */
 #define KWS_CH_RELAY          8
 #define KWS_CH_TEMP           9
 #define KWS_CH_EVCOST        10
 #define KWS_CH_POWER          3
 #define KWS_CH_CURRENT        2
 #define KWS_CH_ENERGY         6
-#define KWS_CH_WIFI          11   /* OBK core — read-only here for MQTT guard */
-#define KWS_CH_SESS_ACTIVE   12   /* 0=idle 1=active — read by display        */
-#define KWS_CH_SESS_ELAPSED  13   /* seconds since sess_start — display timer  */
-/* IMP-A: NTC thermal alarm channel — 0=normal, 1=alarm latched (relay opened).
+#define KWS_CH_WIFI          11   /* OBK core - read-only here for MQTT guard */
+#define KWS_CH_SESS_ACTIVE   12   /* 0=idle 1=active - read by display        */
+#define KWS_CH_SESS_ELAPSED  13   /* seconds since sess_start - display timer  */
+/* IMP-A: NTC thermal alarm channel - 0=normal, 1=alarm latched (relay opened).
  * Read by drv_st7735 to colour the temperature field red and show "THM" in the
  * alarm zone when an over-temperature trip has occurred.
  * Set in autoexec: setChannelType 14 ReadOnly                              */
 #define KWS_CH_NTC_ALARM     14
 
 /* FIX-PATH: BK7231N LittleFS VFS does NOT accept leading slash.
- * "/filename" → fopen returns NULL silently. "filename" works correctly.
+ * "/filename" -> fopen returns NULL silently. "filename" works correctly.
  * Same fix already applied in drv_ht7017.c (FIX-CAL-1). */
 #define KWS_SESSION_FILE     "kws_session.cfg"
 #define KWS_HISTORY_FILE     "kws_history.csv"   /* append-only session log   */
 #define KWS_LIFETIME_FILE    "kws_lifetime.cfg"  /* persists cumulative Wh    */
 #define KWS_MQTT_TOPIC       "home/ev/session"
 /* IMP-B: maximum rows retained in kws_history.csv.
- * Each row ≈ 80 bytes.  200 rows = ~16 kB — well within the 512 kB LittleFS
+ * Each row ~= 80 bytes.  200 rows = ~16 kB - well within the 512 kB LittleFS
  * partition.  At 10 sessions/day this retains ~20 days of history while
  * preventing unbounded flash growth.  Adjustable here at compile time.     */
 #define KWS_HISTORY_MAX_ROWS  200u
 
-/* ── New LittleFS files (v1.1.0) ─────────────────────────────────────────
+/* -- New LittleFS files (v1.1.0) -----------------------------------------
  * All paths: no leading slash (BK7231N LittleFS VFS constraint).          */
 #define KWS_RATE_FILE        "kws_rate.cfg"        /* IMP-G: persisted Rs/kWh rate         */
 #define KWS_PROTECT_FILE     "kws_protection.cfg"  /* IMP-H: persisted OV/UV/OC thresholds */
 #define KWS_DAILY_FILE       "kws_daily.cfg"       /* IMP-J: daily kWh counter + reset ts  */
 #define KWS_FAULTS_FILE      "kws_faults.log"      /* IMP-M: last-N fault log              */
-/* IMP-P: per-vehicle runtime efficiency — loaded/saved via kws_vehicles.cfg.
+/* IMP-P: per-vehicle runtime efficiency - loaded/saved via kws_vehicles.cfg.
  * Format: "veh2_km=XX.X\nveh4_km=XX.X\n"
- * Allows user to tune kWh→km conversion for their specific vehicle.        */
+ * Allows user to tune kWh->km conversion for their specific vehicle.        */
 #define KWS_VEHICLES_FILE    "kws_vehicles.cfg"    /* IMP-P: per-vehicle efficiency factors */
-/* IMP-Q: off-peak charge scheduling — loaded/saved via kws_schedule.cfg.
+/* IMP-Q: off-peak charge scheduling - loaded/saved via kws_schedule.cfg.
  * Format: "enabled=1\nstart=22\nend=6\n"  (hour integers, 0-23, 24h clock)
  * When enabled, relay is only allowed to close during [start, end) window.
- * Wraps midnight correctly (e.g. 22:00 → 06:00).                          */
+ * Wraps midnight correctly (e.g. 22:00 -> 06:00).                          */
 #define KWS_SCHEDULE_FILE    "kws_schedule.cfg"    /* IMP-Q: off-peak window config        */
 
-/* ── IMP-Q: off-peak scheduling defaults ─────────────────────────────────
+/* -- IMP-Q: off-peak scheduling defaults ---------------------------------
  * KWS_SCHED_DEFAULT_START   Default window start hour (10 PM)
  * KWS_SCHED_DEFAULT_END     Default window end hour   (6 AM)
- * Disabled by default — user must run kws_schedule enable to activate.    */
-#define KWS_SCHED_DEFAULT_START  22u   /* hour 0-23 — default window opens at 22:00 */
-#define KWS_SCHED_DEFAULT_END     6u   /* hour 0-23 — default window closes at 06:00 */
+ * Disabled by default - user must run kws_schedule enable to activate.    */
+#define KWS_SCHED_DEFAULT_START  22u   /* hour 0-23 - default window opens at 22:00 */
+#define KWS_SCHED_DEFAULT_END     6u   /* hour 0-23 - default window closes at 06:00 */
 
-/* ── IMP-R: multi-tier time-of-use tariff ────────────────────────────────
+/* -- IMP-R: multi-tier time-of-use tariff --------------------------------
  * Up to KWS_RATE_TIER_MAX time-of-use slots, each with hour range + rate.
  * Stored as an extension of kws_rate.cfg:
  *   rate=7.00          (base/fallback rate, always present)
@@ -269,41 +269,41 @@ static FILE *robust_fopen_w(const char *path)
  *   tier0=22,6,5.00    (start_h, end_h, Rs/kWh)
  *   tier1=9,17,9.50    (peak hours)
  * When tiers=0, single g_rate_rs is used as before.                       */
-#define KWS_RATE_TIER_MAX    3u   /* max TOU tiers — 3 covers peak/off-peak/standard */
+#define KWS_RATE_TIER_MAX    3u   /* max TOU tiers - 3 covers peak/off-peak/standard */
 
-/* ── IMP-G: electricity rate persistence ─────────────────────────────────
+/* -- IMP-G: electricity rate persistence ---------------------------------
  * Rate is loaded from KWS_RATE_FILE at Init().  Saved via kws_rate <val>. */
 
-/* ── IMP-H: protection threshold defaults ────────────────────────────────
+/* -- IMP-H: protection threshold defaults --------------------------------
  * KWS_OV_DEFAULT   Over-voltage trip (V).  HT7017 raises alarm Ch7=1.
  * KWS_UV_DEFAULT   Under-voltage trip (V). HT7017 raises alarm Ch7=2.
  * KWS_OC_DEFAULT   Over-current trip (A).  HT7017 raises alarm Ch7=3.
  * These match the existing HT7017 defaults; persist user changes via
  * KWS_PROTECT_FILE.  Written to HT7017 registers at Init() after load.    */
-#define KWS_OV_DEFAULT       250.0f  /* V — over-voltage threshold           */
-#define KWS_UV_DEFAULT       180.0f  /* V — under-voltage threshold          */
-#define KWS_OC_DEFAULT        16.0f  /* A — over-current threshold           */
+#define KWS_OV_DEFAULT       250.0f  /* V - over-voltage threshold           */
+#define KWS_UV_DEFAULT       180.0f  /* V - under-voltage threshold          */
+#define KWS_OC_DEFAULT        16.0f  /* A - over-current threshold           */
 
-/* ── IMP-I: CO2 saved estimate ───────────────────────────────────────────
+/* -- IMP-I: CO2 saved estimate -------------------------------------------
  * India average grid emission factor 2024 (CEA) = 708 g CO2/kWh.
  * Configurable at compile time; emitted in MQTT session payload as
  * "co2_saved_g" (integer grams, EV vs equivalent fossil fuel).            */
 #define KWS_CO2_GRID_G_PER_KWH  708.0f  /* g CO2 per kWh from grid India     */
 
-/* ── IMP-J: daily kWh summary ────────────────────────────────────────────
+/* -- IMP-J: daily kWh summary --------------------------------------------
  * KWS_DAILY_TOPIC  MQTT topic for midnight daily summary publish.
  * Midnight is detected by g_uptime_s crossing a 24 h boundary relative to
  * g_daily_start_uptime (set at Init() = 0, reset on each midnight event). */
 #define KWS_DAILY_TOPIC      "home/ev/daily"
 
-/* ── IMP-K: reboot counter ───────────────────────────────────────────────
+/* -- IMP-K: reboot counter -----------------------------------------------
  * Reboot count stored as a separate field in kws_lifetime.cfg.
  * Format: "wh=XXXX\nreboots=N\n"
  * On Init() the reboot counter is incremented ONCE and persisted.         */
 
-/* ── IMP-L: MQTT heartbeat / keepalive ──────────────────────────────────
+/* -- IMP-L: MQTT heartbeat / keepalive ----------------------------------
  * KWS_HEARTBEAT_S    Interval between periodic status publishes (seconds).
- *                    Default 300 s (5 min) — HA entities expire at 6× =
+ *                    Default 300 s (5 min) - HA entities expire at 6x =
  *                    30 min, giving comfortable margin.
  * KWS_HEARTBEAT_TOPIC MQTT topic for periodic status payload.
  * The heartbeat payload is compact: relay, temp, session_active, lifetime,
@@ -311,9 +311,9 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_HEARTBEAT_S      300u               /* seconds between publishes  */
 #define KWS_HEARTBEAT_TOPIC  "home/ev/status"
 
-/* ── IMP-M: fault log ─────────────────────────────────────────────────────
+/* -- IMP-M: fault log -----------------------------------------------------
  * KWS_FAULT_MAX_ROWS  Maximum fault entries retained in kws_faults.log.
- * Each row ≤ 80 bytes.  20 rows = ~1.6 kB.  On overflow oldest row is NOT
+ * Each row <= 80 bytes.  20 rows = ~1.6 kB.  On overflow oldest row is NOT
  * dropped (no LittleFS seek/shift on BK7231N); the log is capped in place.
  * The user clears with kws_faults_clear.                                  */
 #define KWS_FAULT_MAX_ROWS   20u
@@ -341,7 +341,7 @@ static uint8_t   g_adFast = 0;
 
 
 /* ============================================================================
- * SECTION B — CHANNEL HELPERS
+ * SECTION B - CHANNEL HELPERS
  * ============================================================================ */
 static void PubCh(int ch, int val)
 {
@@ -350,48 +350,48 @@ static void PubCh(int ch, int val)
     CMD_ExecuteCommand(buf, 0);
 }
 
-extern int CHANNEL_Get(int ch);   /* file-scope extern — audit verified */
+extern int CHANNEL_Get(int ch);   /* file-scope extern - audit verified */
 
 static int ReadCh(int ch) { return CHANNEL_Get(ch); }
 
-/* ── Improvement #6: runtime-adjustable auto-detect threshold ─────────── */
+/* -- Improvement #6: runtime-adjustable auto-detect threshold ----------- */
 static float g_detect_w_min = KWS_DETECT_W_MIN_DEFAULT;
 
-/* ── Improvement #8: lifetime energy accumulator ──────────────────────── *
+/* Improvement #8: lifetime energy accumulator
  * Loaded from KWS_LIFETIME_FILE at init.  Updated every 60 s while        *
  * a session is active, and on every sess_end().                            *
  * Unit: Wh (float). Persists across reflashes as long as JFFS2 is intact. */
 static float    g_lifetime_wh     = 0.0f;
 static uint8_t  g_lifetime_dirty  = 0u;   /* 1 = needs write to flash     */
 
-/* ── IMP-G: persisted electricity rate ───────────────────────────────────
+/* -- IMP-G: persisted electricity rate -----------------------------------
  * Loaded from KWS_RATE_FILE at Init(); saved when kws_rate <val> is used. */
-/* (g_rate_rs already declared above — IMP-G adds persistence around it)   */
+/* (g_rate_rs already declared above - IMP-G adds persistence around it)   */
 
-/* ── IMP-H: protection thresholds ────────────────────────────────────────
+/* -- IMP-H: protection thresholds ----------------------------------------
  * Loaded from KWS_PROTECT_FILE; written to HT7017 at Init() after load.
  * These are runtime values; defaults defined in Section A.                */
 static float    g_ov_thr    = KWS_OV_DEFAULT;  /* over-voltage trip (V)    */
 static float    g_uv_thr    = KWS_UV_DEFAULT;  /* under-voltage trip (V)   */
 static float    g_oc_thr    = KWS_OC_DEFAULT;  /* over-current trip (A)    */
 
-/* ── IMP-J: daily kWh accumulator ────────────────────────────────────────
+/* -- IMP-J: daily kWh accumulator ----------------------------------------
  * g_daily_kwh   accumulates kWh from session ends during the current day.
  * g_daily_start_uptime  uptime_s at the start of the current day period.
  * g_daily_mqtt_sent     1 = daily summary already sent this midnight event.*/
 static float    g_daily_kwh           = 0.0f;
 static uint32_t g_daily_start_uptime  = 0u;
-/* g_daily_last_midnight removed — IMP-S uses NTP wall-clock midnight directly */
+/* g_daily_last_midnight removed - IMP-S uses NTP wall-clock midnight directly */
 static uint8_t  g_daily_mqtt_sent     = 0u;
 
-/* ── IMP-K: reboot counter ────────────────────────────────────────────── */
+/* -- IMP-K: reboot counter ---------------------------------------------- */
 static uint32_t g_reboot_count = 0u;   /* loaded from kws_lifetime.cfg     */
 
-/* ── IMP-L: MQTT heartbeat ───────────────────────────────────────────────
+/* -- IMP-L: MQTT heartbeat -----------------------------------------------
  * g_hb_tick  counts seconds; triggers a publish when it reaches KWS_HEARTBEAT_S. */
 static uint32_t g_hb_tick = 0u;
 
-/* ── IMP-P: per-vehicle runtime efficiency factors ───────────────────────
+/* -- IMP-P: per-vehicle runtime efficiency factors -----------------------
  * Runtime equivalents of the compile-time KWS_VEH2/4_KM_PER_KWH defines.
  * Loaded from KWS_VEHICLES_FILE; set via kws_veh_config command.
  * Initialised to compile-time defaults so the firmware works out of the box
@@ -401,7 +401,7 @@ static float g_veh4_km_pkwh = KWS_VEH4_KM_PER_KWH; /* 4-wheeler km per kWh */
 static float g_veh2_old_kmpl = KWS_VEH2_OLD_KMPL;  /* 2-wheeler petrol km/L */
 static float g_veh4_old_kmpl = KWS_VEH4_OLD_KMPL;  /* 4-wheeler petrol km/L */
 
-/* ── IMP-Q: off-peak scheduling state ───────────────────────────────────
+/* -- IMP-Q: off-peak scheduling state -----------------------------------
  * g_sched_enabled  1 = scheduling active; relay blocked outside window.
  * g_sched_start    Hour (0-23) when the charge window opens.
  * g_sched_end      Hour (0-23) when the charge window closes.
@@ -411,19 +411,19 @@ static uint8_t  g_sched_start   = KWS_SCHED_DEFAULT_START;
 static uint8_t  g_sched_end     = KWS_SCHED_DEFAULT_END;
 static uint8_t  g_sched_blocked = 0u;               /* for log dedup         */
 
-/* ── IMP-R: time-of-use tariff tiers ────────────────────────────────────
+/* -- IMP-R: time-of-use tariff tiers ------------------------------------
  * Array of up to KWS_RATE_TIER_MAX active TOU tiers.
- * g_rate_tiers_n = 0 means disabled — falls back to g_rate_rs.           */
+ * g_rate_tiers_n = 0 means disabled - falls back to g_rate_rs.           */
 typedef struct {
     uint8_t start_h;   /* hour window opens  (0-23) */
-    uint8_t end_h;     /* hour window closes (0-23) — wraps midnight if start > end */
+    uint8_t end_h;     /* hour window closes (0-23) - wraps midnight if start > end */
     float   rate_rs;   /* Rs/kWh for this window */
 } RateTier_t;
 static RateTier_t g_rate_tiers[KWS_RATE_TIER_MAX];
 static uint8_t    g_rate_tiers_n = 0u;  /* active tier count; 0 = TOU disabled */
 
 /*
- * lifetime_load() — v1.1.0
+ * lifetime_load() - v1.1.0
  * IMP-K: also reads reboots= field from kws_lifetime.cfg.
  * The wh= field is mandatory; reboots= is optional (old file = 0 reboots).
  */
@@ -436,14 +436,14 @@ static void lifetime_load(void)
     /* Read mandatory wh= line; reboots= line is optional (old format). */
     int n = fscanf(f, "wh=%f\n", &tmp);
     if (n == 1) {
-        /* Attempt to read optional reboots line — ignore parse failure. */
+        /* Attempt to read optional reboots line - ignore parse failure. */
         fscanf(f, "reboots=%u\n", &rb);
     }
     fclose(f);
     /* BUG-8/9 FIX: check fscanf return and reject NaN/Inf/negative. */
     if (n != 1 || !(tmp >= 0.0f)) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: lifetime file invalid (n=%d val=%f) — reset to 0", n, tmp);
+                  "KWS303WF: lifetime file invalid (n=%d val=%f) - reset to 0", n, tmp);
         g_lifetime_wh   = 0.0f;
         g_reboot_count  = 0u;
         return;
@@ -467,8 +467,8 @@ static void lifetime_save(void)
     g_lifetime_dirty = 0u;
 }
 
-/* ── IMP-G: rate persistence ─────────────────────────────────────────────
- * IMP-G: rate_load() — restore saved electricity tariff from flash.
+/* -- IMP-G: rate persistence ---------------------------------------------
+ * IMP-G: rate_load() - restore saved electricity tariff from flash.
  * Called at Init() before the first RunEverySecond.                       */
 static void rate_load(void)
 {
@@ -479,7 +479,7 @@ static void rate_load(void)
     fclose(f);
     if (n != 1 || !(tmp > 0.0f)) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: rate file invalid (n=%d val=%f) — using default %.2f",
+                  "KWS303WF: rate file invalid (n=%d val=%f) - using default %.2f",
                   n, tmp, KWS_EV_RATE_DEFAULT);
         return;
     }
@@ -488,13 +488,13 @@ static void rate_load(void)
               "KWS303WF: rate loaded %.4f Rs/kWh", g_rate_rs);
 }
 
-/* IMP-G: rate_save() — persist current tariff to flash. */
+/* IMP-G: rate_save() - persist current tariff to flash. */
 static void rate_save(void)
 {
     FILE *f = robust_fopen_w(KWS_RATE_FILE);
     if (!f) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: rate_save failed — %s", KWS_RATE_FILE);
+                  "KWS303WF: rate_save failed - %s", KWS_RATE_FILE);
         return;
     }
     fprintf(f, "rate=%.4f\n", g_rate_rs);
@@ -503,8 +503,8 @@ static void rate_save(void)
               "KWS303WF: rate saved %.4f Rs/kWh", g_rate_rs);
 }
 
-/* ── IMP-H: protection threshold persistence ────────────────────────────
- * IMP-H: protect_load() — restore OV/UV/OC thresholds from flash.        */
+/* -- IMP-H: protection threshold persistence ----------------------------
+ * IMP-H: protect_load() - restore OV/UV/OC thresholds from flash.        */
 static void protect_load(void)
 {
     FILE *f = fopen(KWS_PROTECT_FILE, "r");
@@ -515,7 +515,7 @@ static void protect_load(void)
     /* Validate: all three must parse; all must be finite and positive.    */
     if (n != 3 || !(ov > 0.0f) || !(uv > 0.0f) || !(oc > 0.0f)) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: protect file invalid (n=%d) — using defaults", n);
+                  "KWS303WF: protect file invalid (n=%d) - using defaults", n);
         return;
     }
     g_ov_thr = ov;
@@ -526,14 +526,14 @@ static void protect_load(void)
               g_ov_thr, g_uv_thr, g_oc_thr);
 }
 
-/* IMP-H: protect_save() — persist current thresholds to flash.
+/* IMP-H: protect_save() - persist current thresholds to flash.
  * Called when any threshold is changed via kws_protect command.           */
 static void protect_save(void)
 {
     FILE *f = robust_fopen_w(KWS_PROTECT_FILE);
     if (!f) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: protect_save failed — %s", KWS_PROTECT_FILE);
+                  "KWS303WF: protect_save failed - %s", KWS_PROTECT_FILE);
         return;
     }
     fprintf(f, "ov=%.2f\nuv=%.2f\noc=%.2f\n", g_ov_thr, g_uv_thr, g_oc_thr);
@@ -543,8 +543,8 @@ static void protect_save(void)
               g_ov_thr, g_uv_thr, g_oc_thr);
 }
 
-/* ── IMP-J: daily kWh persistence ───────────────────────────────────────
- * IMP-J: daily_load() — restore today's accumulated kWh from flash.
+/* -- IMP-J: daily kWh persistence ---------------------------------------
+ * IMP-J: daily_load() - restore today's accumulated kWh from flash.
  * Format: "kwh=XXXX.XXX\nstart=%u\n"
  * The start field is g_uptime_s at the last midnight reset.
  * On reboot during the same calendar day this restores partial accumulation.*/
@@ -560,7 +560,7 @@ static void daily_load(void)
     fclose(f);
     if (n != 2 || !(kwh >= 0.0f)) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: daily file invalid (n=%d) — reset", n);
+                  "KWS303WF: daily file invalid (n=%d) - reset", n);
         return;
     }
     g_daily_kwh          = kwh;
@@ -570,7 +570,7 @@ static void daily_load(void)
               g_daily_kwh, (unsigned)g_daily_start_uptime);
 }
 
-/* IMP-J: daily_save() — persist daily accumulator to flash. */
+/* IMP-J: daily_save() - persist daily accumulator to flash. */
 static void daily_save(void)
 {
     FILE *f = robust_fopen_w(KWS_DAILY_FILE);
@@ -580,8 +580,8 @@ static void daily_save(void)
     fclose(f);
 }
 
-/* ── IMP-P: per-vehicle efficiency persistence ───────────────────────────
- * IMP-P: vehicles_load() — restore per-vehicle km/kWh factors from flash.
+/* -- IMP-P: per-vehicle efficiency persistence ---------------------------
+ * IMP-P: vehicles_load() - restore per-vehicle km/kWh factors from flash.
  * Falls back silently to compile-time defaults if file is missing/corrupt. */
 static void vehicles_load(void)
 {
@@ -594,7 +594,7 @@ static void vehicles_load(void)
     /* Require all four values; all must be finite and positive. */
     if (n != 4 || !(v2 > 0.0f) || !(v4 > 0.0f) || !(p2 > 0.0f) || !(p4 > 0.0f)) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: vehicles file invalid (n=%d) — using defaults", n);
+                  "KWS303WF: vehicles file invalid (n=%d) - using defaults", n);
         return;
     }
     g_veh2_km_pkwh  = v2;
@@ -606,13 +606,13 @@ static void vehicles_load(void)
               g_veh2_km_pkwh, g_veh2_old_kmpl, g_veh4_km_pkwh, g_veh4_old_kmpl);
 }
 
-/* IMP-P: vehicles_save() — persist current efficiency factors. */
+/* IMP-P: vehicles_save() - persist current efficiency factors. */
 static void vehicles_save(void)
 {
     FILE *f = robust_fopen_w(KWS_VEHICLES_FILE);
     if (!f) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: vehicles_save failed — %s", KWS_VEHICLES_FILE);
+                  "KWS303WF: vehicles_save failed - %s", KWS_VEHICLES_FILE);
         return;
     }
     fprintf(f, "veh2_km=%.2f\nveh4_km=%.2f\nveh2_kmpl=%.2f\nveh4_kmpl=%.2f\n",
@@ -623,8 +623,8 @@ static void vehicles_save(void)
               g_veh2_km_pkwh, g_veh4_km_pkwh);
 }
 
-/* ── IMP-Q: off-peak schedule persistence ────────────────────────────────
- * IMP-Q: schedule_load() — restore scheduling config from flash.          */
+/* -- IMP-Q: off-peak schedule persistence --------------------------------
+ * IMP-Q: schedule_load() - restore scheduling config from flash.          */
 static void schedule_load(void)
 {
     FILE *f = fopen(KWS_SCHEDULE_FILE, "r");
@@ -634,7 +634,7 @@ static void schedule_load(void)
     fclose(f);
     if (n != 3 || sh > 23u || eh > 23u) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: schedule file invalid (n=%d) — disabled", n);
+                  "KWS303WF: schedule file invalid (n=%d) - disabled", n);
         return;
     }
     g_sched_enabled = (uint8_t)(en ? 1u : 0u);
@@ -645,13 +645,13 @@ static void schedule_load(void)
               (unsigned)g_sched_enabled, (unsigned)g_sched_start, (unsigned)g_sched_end);
 }
 
-/* IMP-Q: schedule_save() — persist scheduling config. */
+/* IMP-Q: schedule_save() - persist scheduling config. */
 static void schedule_save(void)
 {
     FILE *f = robust_fopen_w(KWS_SCHEDULE_FILE);
     if (!f) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: schedule_save failed — %s", KWS_SCHEDULE_FILE);
+                  "KWS303WF: schedule_save failed - %s", KWS_SCHEDULE_FILE);
         return;
     }
     fprintf(f, "enabled=%u\nstart=%u\nend=%u\n",
@@ -659,15 +659,15 @@ static void schedule_save(void)
     fclose(f);
 }
 
-/* IMP-Q: sched_window_active() — returns 1 if current NTP hour is inside the
- * configured charge window.  Handles midnight-wrap (e.g. 22→06).
- * Returns 1 (allow) when NTP is not synced — fail-safe, don't block charging
+/* IMP-Q: sched_window_active() - returns 1 if current NTP hour is inside the
+ * configured charge window.  Handles midnight-wrap (e.g. 22->06).
+ * Returns 1 (allow) when NTP is not synced - fail-safe, don't block charging
  * just because the clock isn't set yet.                                    */
 static uint8_t sched_window_active(void)
 {
-    if (!g_sched_enabled) return 1u;   /* scheduling off — always allow     */
+    if (!g_sched_enabled) return 1u;   /* scheduling off - always allow     */
 #ifdef ENABLE_NTP
-    if (!NTP_IsSynced()) return 1u;    /* no time yet — fail open           */
+    if (!NTP_IsSynced()) return 1u;    /* no time yet - fail open           */
     int h = NTP_GetHour();
     uint8_t sh = g_sched_start;
     uint8_t eh = g_sched_end;
@@ -679,12 +679,12 @@ static uint8_t sched_window_active(void)
         return (h >= sh || h < eh) ? 1u : 0u;
     }
 #else
-    return 1u;   /* no NTP compiled in — always allow */
+    return 1u;   /* no NTP compiled in - always allow */
 #endif
 }
 
-/* ── IMP-R: TOU tariff persistence ──────────────────────────────────────
- * IMP-R: tou_load() — parse kws_rate.cfg for tier lines added by kws_tou.
+/* -- IMP-R: TOU tariff persistence --------------------------------------
+ * IMP-R: tou_load() - parse kws_rate.cfg for tier lines added by kws_tou.
  * The base rate= line is already read by rate_load(); this reads extra tier
  * lines from the same file in a second pass (avoids a separate file).
  * Format appended to kws_rate.cfg:
@@ -719,7 +719,7 @@ static void tou_load(void)
     }
 }
 
-/* IMP-R: tou_save() — append tier lines to kws_rate.cfg after the base rate.
+/* IMP-R: tou_save() - append tier lines to kws_rate.cfg after the base rate.
  * Rewrites the whole file so previous tier lines are replaced, not appended. */
 static void tou_save(void)
 {
@@ -737,7 +737,7 @@ static void tou_save(void)
     fclose(f);
 }
 
-/* IMP-R: rate_for_hour() — returns the applicable Rs/kWh for the given hour.
+/* IMP-R: rate_for_hour() - returns the applicable Rs/kWh for the given hour.
  * Iterates active TOU tiers; returns g_rate_rs if none matches or tiers=0.
  * Handles midnight-crossing windows identically to sched_window_active().  */
 static float rate_for_hour(int h)
@@ -757,7 +757,7 @@ static float rate_for_hour(int h)
     return g_rate_rs;   /* base/fallback rate */
 }
 
-/* IMP-O+R: current_rate() — returns applicable rate using NTP hour if available.
+/* IMP-O+R: current_rate() - returns applicable rate using NTP hour if available.
  * Used by sess_tick() to price each second correctly under TOU.
  * Falls back to g_rate_rs if NTP is not synced or TOU is disabled.        */
 static float current_rate(void)
@@ -772,25 +772,25 @@ static float current_rate(void)
 }
 
 
-/* IMP-M: fault_log() — append one fault event to kws_faults.log.
+/* IMP-M: fault_log() - append one fault event to kws_faults.log.
  * Capped at KWS_FAULT_MAX_ROWS to prevent unbounded flash growth.
  * alarm_code: 1=OV, 2=UV, 3=OC, 4=OP (power), 5=THM (NTC)
  * uptime_s: caller provides g_uptime_s for the timestamp.               */
 static void fault_log(uint8_t alarm_code, uint32_t uptime_s, float value)
 {
-    /* Count existing rows — same approach as history_append(). */
+    /* Count existing rows - same approach as history_append(). */
     {
         FILE *fc = fopen(KWS_FAULTS_FILE, "r");
         if (fc) {
             uint32_t rows = 0u;
-            char tmp[96];   /* PERF-1: was [4] — fault rows are "uptime,code,value\n" ~30 chars */
+            char tmp[96];   /* PERF-1: was [4] - fault rows are "uptime,code,value\n" ~30 chars */
             while (fgets(tmp, sizeof(tmp), fc)) {
                 if (tmp[0] != '\0' && strchr(tmp, '\n')) rows++;
             }
             fclose(fc);
             if (rows >= KWS_FAULT_MAX_ROWS) {
                 addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                          "KWS303WF: fault log full (%u rows) — use kws_faults_clear",
+                          "KWS303WF: fault log full (%u rows) - use kws_faults_clear",
                           (unsigned)rows);
                 return;
             }
@@ -816,7 +816,7 @@ static void fault_log(uint8_t alarm_code, uint32_t uptime_s, float value)
 }
 
 /* ============================================================================
- * EV SESSION TYPES AND STATE — hoisted before SECTION C so that relay_close()
+ * EV SESSION TYPES AND STATE - hoisted before SECTION C so that relay_close()
  * and relay_open() (FIX-UX1) can reference g_ev and g_preferred_veh without
  * a forward declaration of a variable (not legal in C99).
  * ============================================================================ */
@@ -845,18 +845,18 @@ static EvSess_t  g_ev;
 static uint8_t   g_preferred_veh = KWS_VEH_NONE;
 
 /* ============================================================================
- * SECTION C — RELAY
+ * SECTION C - RELAY
  * ============================================================================ */
 static uint32_t g_uptime_s    = 0;
 static uint8_t  g_relay_closed = 0;
 static uint8_t  g_pulse_pin    = 0;
 static uint32_t g_pulse_off_at = 0;
 
-/* Forward declarations — sess_start/sess_end are defined in SECTION F but
+/* Forward declarations - sess_start/sess_end are defined in SECTION F but
  * referenced in SECTION C and G.
  * relay_open() calls sess_end() (FIX-UX1).
  * on_session() calls sess_start() and sess_end() (FIX-UX3).
- * handlers in SECTION G — forward-declare to satisfy C99 single-pass rule. */
+ * handlers in SECTION G - forward-declare to satisfy C99 single-pass rule. */
 static void sess_start(uint8_t veh);
 static void sess_end(void);
 
@@ -884,12 +884,12 @@ static void relay_open(void)
     g_relay_closed = 0;
     PubCh(KWS_CH_RELAY, 0);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: Relay OPEN (HAL%d→GPIO-P8 OFF-coil pulsed, load OFF)",
+              "KWS303WF: Relay OPEN (HAL%d->GPIO-P8 OFF-coil pulsed, load OFF)",
               KWS_RELAY_PIN_OFF);
     /* FIX-UX1: auto-end session when relay opens so timer and cost stop
      * immediately.  If already idle this is a no-op (sess_end guards active). */
     if (g_ev.active) sess_end();
-    /* FIX-UX3: relay is open — nothing can be detected.  Reset detector so
+    /* FIX-UX3: relay is open - nothing can be detected.  Reset detector so
      * stale AD_DETECTING/AD_CHARGING state does not carry over when the relay
      * is re-closed later.  g_adFast cleared to prevent a stale fast window.   */
     g_ad     = AD_IDLE;
@@ -898,7 +898,7 @@ static void relay_open(void)
 }
 
 /*
- * relay_close() — v1.2.0
+ * relay_close() - v1.2.0
  * IMP-Q: off-peak schedule gate added.  If scheduling is enabled and NTP is
  * synced and we are outside the configured window, the relay close is vetoed.
  * The relay stays open; a log message is printed once (g_sched_blocked dedup).
@@ -906,13 +906,13 @@ static void relay_open(void)
  */
 static void relay_close(void)
 {
-    /* IMP-Q: schedule gate — veto relay close outside the charge window. */
+    /* IMP-Q: schedule gate - veto relay close outside the charge window. */
     if (!sched_window_active()) {
         if (!g_sched_blocked) {
             g_sched_blocked = 1u;
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                       "KWS303WF: relay close BLOCKED by schedule "
-                      "(window %02u:00-%02u:00, now=%02u:xx) — "
+                      "(window %02u:00-%02u:00, now=%02u:xx) - "
                       "use kws_schedule disable to bypass",
                       (unsigned)g_sched_start, (unsigned)g_sched_end,
 #ifdef ENABLE_NTP
@@ -929,24 +929,24 @@ static void relay_close(void)
     g_relay_closed = 1;
     PubCh(KWS_CH_RELAY, 100);
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: Relay CLOSE (HAL%d→GPIO-P7 ON-coil pulsed, load ON)",
+              "KWS303WF: Relay CLOSE (HAL%d->GPIO-P7 ON-coil pulsed, load ON)",
               KWS_RELAY_PIN_ON);
     /* FIX-UX3: arm fast detection window instead of starting session immediately.
      *
      * Previous FIX-UX1 called sess_start() here unconditionally, which started
      * a session for ANY load (phone charger, lamp, etc.) the moment the relay
      * closed.  The correct behaviour is:
-     *   • Arm AD_DETECTING with a 5 s fast-confirm window.
-     *   • If load ≥ g_detect_w_min for 5 consecutive seconds → sess_start().
-     *   • If load < g_detect_w_min (normal appliance) → AD_IDLE, no session.
+     *   * Arm AD_DETECTING with a 5 s fast-confirm window.
+     *   * If load >= g_detect_w_min for 5 consecutive seconds -> sess_start().
+     *   * If load < g_detect_w_min (normal appliance) -> AD_IDLE, no session.
      *
      * The 5 s window (KWS_DETECT_S_FAST) is short enough that the user sees
      * "CHG" and the timer start within 5 s of plugging in the EV, yet long
-     * enough to absorb HT7017 UART first-report latency (~1–2 s).
+     * enough to absorb HT7017 UART first-report latency (~1-2 s).
      *
      * Only arm if auto-detect is enabled.  If auto is off, the user must press
      * [+] SESSION or use kws_session2w / kws_session4w manually.
-     * If a session is already active (resumed from flash), leave it — relay_sync
+     * If a session is already active (resumed from flash), leave it - relay_sync
      * can call relay_close() when Ch8 is 100 but we must not disturb a live
      * session on every RunEverySecond tick.                                    */
     if (g_auto_en && !g_ev.active) {
@@ -968,35 +968,35 @@ static void relay_sync(int ch8_val)
 }
 
 /* ============================================================================
- * SECTION D — NTC TEMPERATURE  (v2 — NASA three-layer adaptive sampling)
+ * SECTION D - NTC TEMPERATURE  (v2 - NASA three-layer adaptive sampling)
  *
  *  State machine overview
- *  ──────────────────────
+ *  ----------------------
  *
  *  RunEverySecond()
- *    └─► ntc_tick()
- *          ├─ g_ntc_countdown > 1 ?  decrement and RETURN (cheap path)
- *          └─ countdown == 0:
+ *    +-> ntc_tick()
+ *          +- g_ntc_countdown > 1 ?  decrement and RETURN (cheap path)
+ *          +- countdown == 0:
  *               reload countdown = SLOW or FAST period
- *               read ADC → Steinhart-Hart → T_raw
+ *               read ADC -> Steinhart-Hart -> T_raw
  *               guard: reject T_raw outside [-40, 125] (probe fault)
  *               EMA: seed on first valid reading, then y += (x-y)/N
  *               dT_dt   = |T_ema - T_ema_prev|     per-sample rate
  *               delta   = |T_ema - T_last_pub|      since last publish
- *               ─── LAYER 3: T_ema ≥ ALARM_C ─────────────────────────────
- *               │   relay_open(), latch g_ntc_alarm, stay FAST, publish
- *               ─── LAYER 2: dT_dt ≥ TRIGGER or T_ema ≥ WARN ────────────
- *               │   switch g_ntc_in_fast=1, reset fast_held counter
- *               ─── LAYER 1: stable + held ≥ MIN_TICKS ───────────────────
- *               │   switch g_ntc_in_fast=0, reload SLOW countdown
- *               ─── PUBLISH GATE ─────────────────────────────────────────
- *                   delta ≥ DEADBAND or is_slow_tick or alarm → PubCh(9)
+ *               --- LAYER 3: T_ema >= ALARM_C -----------------------------
+ *               |   relay_open(), latch g_ntc_alarm, stay FAST, publish
+ *               --- LAYER 2: dT_dt >= TRIGGER or T_ema >= WARN ------------
+ *               |   switch g_ntc_in_fast=1, reset fast_held counter
+ *               --- LAYER 1: stable + held >= MIN_TICKS -------------------
+ *               |   switch g_ntc_in_fast=0, reload SLOW countdown
+ *               --- PUBLISH GATE -----------------------------------------
+ *                   delta >= DEADBAND or is_slow_tick or alarm -> PubCh(9)
  *
- *  Memory delta vs original: +6 bytes (3 floats→3 floats, +4 uint8 fields)
- *  CPU delta on non-sample ticks: 1 decrement + 1 compare = ~0.1 µs
+ *  Memory delta vs original: +6 bytes (3 floats->3 floats, +4 uint8 fields)
+ *  CPU delta on non-sample ticks: 1 decrement + 1 compare = ~0.1 ?s
  * ============================================================================ */
 
-/* ── Steinhart-Hart B-parameter equation (unchanged from v1) ──────────── */
+/* -- Steinhart-Hart B-parameter equation (unchanged from v1) ------------ */
 static float ntc_raw_celsius(void)
 {
     uint32_t raw = HAL_ADC_Read(KWS_ADC_CH);
@@ -1013,8 +1013,8 @@ static float ntc_raw_celsius(void)
     return temp_k - 273.15f;
 }
 
-/* ── NTC adaptive state ────────────────────────────────────────────────── */
-static float   g_ntc_ema       = 25.0f;   /* EMA filtered temperature (°C)  */
+/* -- NTC adaptive state -------------------------------------------------- */
+static float   g_ntc_ema       = 25.0f;   /* EMA filtered temperature (degC)  */
 static float   g_ntc_ema_prev  = 25.0f;   /* previous EMA for dT/dt         */
 static float   g_ntc_last_pub  = -999.0f; /* last Ch9 value (-999=force pub) */
 static uint8_t g_ntc_countdown = 1u;      /* ticks until next ADC sample    */
@@ -1023,38 +1023,38 @@ static uint8_t g_ntc_seeded    = 0u;      /* EMA seed flag                  */
 static uint8_t g_ntc_alarm     = 0u;      /* over-temp alarm latch          */
 static uint8_t g_ntc_in_fast   = 0u;      /* 1 = FAST mode active           */
 /* NTC ADC warmup: BK7231N ADC takes several cycles to settle after power-on.
- * The first samples read artificially low counts → Steinhart-Hart maps them
- * to artificially high temperatures (observed: 52°C → real 39°C in ~2s).
+ * The first samples read artificially low counts -> Steinhart-Hart maps them
+ * to artificially high temperatures (observed: 52degC -> real 39degC in ~2s).
  * Discard the first NTC_ADC_WARMUP_SAMPLES before seeding the EMA.         */
 #define NTC_ADC_WARMUP_SAMPLES  3u
 static uint8_t g_ntc_warmup    = NTC_ADC_WARMUP_SAMPLES;
 
 static void ntc_tick(void)
 {
-    /* ── Cheap path: not yet time to sample ─────────────────────────── */
+    /* -- Cheap path: not yet time to sample --------------------------- */
     if (g_ntc_countdown > 1u) { g_ntc_countdown--; return; }
 
-    /* ── Reload countdown BEFORE doing the work (prevents drift) ───── */
+    /* -- Reload countdown BEFORE doing the work (prevents drift) ----- */
     g_ntc_countdown = g_ntc_in_fast ? (uint8_t)NTC_FAST_PERIOD
                                      : (uint8_t)NTC_SLOW_PERIOD;
 
-    /* ── STEP 1: Raw ADC → °C ────────────────────────────────────────
+    /* -- STEP 1: Raw ADC -> degC ----------------------------------------
      * Reject readings outside the physical range of the circuit.
-     * -40°C lower limit = NTC near open-circuit (probe disconnected).
-     * 125°C upper limit = NTC near short-circuit.
-     * DO NOT trigger alarm on invalid reads — hardware fault, not over-temp. */
+     * -40degC lower limit = NTC near open-circuit (probe disconnected).
+     * 125degC upper limit = NTC near short-circuit.
+     * DO NOT trigger alarm on invalid reads - hardware fault, not over-temp. */
     float t_raw = ntc_raw_celsius();
     if (t_raw < -40.0f || t_raw > 125.0f) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: NTC invalid %.1fC — probe fault or cold boot glitch",
+                  "KWS303WF: NTC invalid %.1fC - probe fault or cold boot glitch",
                   t_raw);
         return;
     }
 
-    /* ── STEP 2: ADC warmup discard ─────────────────────────────────────
+    /* -- STEP 2: ADC warmup discard -------------------------------------
      * Silently discard the first NTC_ADC_WARMUP_SAMPLES readings after boot.
-     * The BK7231N ADC settles slowly — early samples read too low, which
-     * Steinhart-Hart maps to falsely high temperatures (observed ~52°C spike
+     * The BK7231N ADC settles slowly - early samples read too low, which
+     * Steinhart-Hart maps to falsely high temperatures (observed ~52degC spike
      * decaying to real value in ~2 s). Log the discarded reading so the
      * behaviour is visible in the console without triggering any alarm path. */
     if (g_ntc_warmup > 0u) {
@@ -1065,10 +1065,10 @@ static void ntc_tick(void)
         return;
     }
 
-    /* ── STEP 3: EMA filter ──────────────────────────────────────────
+    /* -- STEP 3: EMA filter ------------------------------------------
      * First call after warmup: seed EMA with actual reading so we do not
-     * start from 25°C and produce a false transient on a hot system.
-     * Subsequent calls: y += (x - y) / N  (α=1/N, N=NTC_EMA_N=4).     */
+     * start from 25degC and produce a false transient on a hot system.
+     * Subsequent calls: y += (x - y) / N  (alpha=1/N, N=NTC_EMA_N=4).     */
     g_ntc_ema_prev = g_ntc_ema;
     if (!g_ntc_seeded) {
         g_ntc_ema   = t_raw;
@@ -1077,9 +1077,9 @@ static void ntc_tick(void)
         g_ntc_ema += (t_raw - g_ntc_ema) / (float)NTC_EMA_N;
     }
 
-    /* ── STEP 4: Rate-of-change and delta from last publish ──────────
-     * dT_dt is in °C per sample interval (not °C/s).
-     * At SLOW (10 s interval): NTC_FAST_TRIGGER_C=1.0 °C/sample = 6°C/min.
+    /* -- STEP 4: Rate-of-change and delta from last publish ----------
+     * dT_dt is in degC per sample interval (not degC/s).
+     * At SLOW (10 s interval): NTC_FAST_TRIGGER_C=1.0 degC/sample = 6degC/min.
      * At FAST (1 s interval):  same threshold but per-second sensitivity.
      * fabsf() avoided: manual abs saves one libm call here.             */
     float dt_dt = g_ntc_ema - g_ntc_ema_prev;
@@ -1088,12 +1088,12 @@ static void ntc_tick(void)
     float delta_pub = g_ntc_ema - g_ntc_last_pub;
     if (delta_pub < 0.0f) delta_pub = -delta_pub;
 
-    /* ── STEP 5: LAYER 3 — ALARM (highest priority) ─────────────────
-     * T_ema ≥ NTC_ALARM_C (70°C = PVC cable insulation rating).
+    /* -- STEP 5: LAYER 3 - ALARM (highest priority) -----------------
+     * T_ema >= NTC_ALARM_C (70degC = PVC cable insulation rating).
      * Action: open relay immediately, latch fast mode, always publish.
-     * Relay does NOT auto-close after alarm clears — requires explicit
+     * Relay does NOT auto-close after alarm clears - requires explicit
      * operator action (kws_relay_on or kws_ntc_alarm_reset + kws_relay_on).
-     * 5°C hysteresis on alarm clear prevents chattering.                */
+     * 5degC hysteresis on alarm clear prevents chattering.                */
     if (g_ntc_ema >= NTC_ALARM_C) {
         if (!g_ntc_alarm) {
             g_ntc_alarm   = 1u;
@@ -1109,18 +1109,18 @@ static void ntc_tick(void)
         }
         PubCh(KWS_CH_TEMP, (int)(g_ntc_ema * 100.0f));
         g_ntc_last_pub = g_ntc_ema;
-        return;   /* skip LAYER 2/1 — alarm owns the state */
+        return;   /* skip LAYER 2/1 - alarm owns the state */
     }
-    /* Alarm hysteresis clear (5°C below alarm threshold) */
+    /* Alarm hysteresis clear (5degC below alarm threshold) */
     if (g_ntc_alarm && g_ntc_ema < (NTC_ALARM_C - 5.0f)) {
         g_ntc_alarm = 0u;
         PubCh(KWS_CH_NTC_ALARM, 0);   /* IMP-A: clear alarm channel */
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: NTC alarm cleared %.1fC — relay stays open, manual reset required",
+                  "KWS303WF: NTC alarm cleared %.1fC - relay stays open, manual reset required",
                   g_ntc_ema);
     }
 
-    /* ── STEP 6: LAYER 2 — TRANSIENT DETECTION ──────────────────────
+    /* -- STEP 6: LAYER 2 - TRANSIENT DETECTION ----------------------
      * Switch to FAST mode when temperature is changing meaningfully OR
      * when approaching the warning threshold.
      * g_ntc_fast_held counts ticks in FAST to enforce NTC_FAST_MIN_TICKS. */
@@ -1139,9 +1139,9 @@ static void ntc_tick(void)
         g_ntc_fast_held++;
 
     } else if (g_ntc_in_fast) {
-        /* ── LAYER 1: STEADY STATE — return to SLOW ─────────────────
+        /* -- LAYER 1: STEADY STATE - return to SLOW -----------------
          * Require NTC_FAST_MIN_TICKS elapsed before returning to SLOW.
-         * This prevents FAST→SLOW→FAST oscillation when the temperature
+         * This prevents FAST->SLOW->FAST oscillation when the temperature
          * hovers exactly at the trigger threshold.                      */
         g_ntc_fast_held++;
         if (g_ntc_fast_held >= (uint8_t)NTC_FAST_MIN_TICKS) {
@@ -1153,11 +1153,11 @@ static void ntc_tick(void)
         }
     }
 
-    /* ── STEP 7: PUBLISH GATE ────────────────────────────────────────
+    /* -- STEP 7: PUBLISH GATE ----------------------------------------
      * Publish Ch9 when:
-     *   (a) Temperature has changed by ≥ NTC_DEADBAND_C since last publish.
-     *       At 27°C ADC noise ≈ ±0.16°C << 0.5°C deadband → zero noise publishes.
-     *   (b) This is a SLOW-mode tick (keepalive: guarantees HA freshness ≤ 10 s).
+     *   (a) Temperature has changed by >= NTC_DEADBAND_C since last publish.
+     *       At 27degC ADC noise ~= +/-0.16degC << 0.5degC deadband -> zero noise publishes.
+     *   (b) This is a SLOW-mode tick (keepalive: guarantees HA freshness <= 10 s).
      *       Even a perfectly stable NTC publishes once per SLOW_PERIOD.
      * Note: ALARM path above publishes unconditionally and returns early.  */
     bool publish = (delta_pub >= NTC_DEADBAND_C) || (!g_ntc_in_fast);
@@ -1167,7 +1167,7 @@ static void ntc_tick(void)
     }
 }
 
-/* ── Diagnostic console commands ────────────────────────────────────── */
+/* -- Diagnostic console commands -------------------------------------- */
 static commandResult_t CMD_NtcStatus(const void *ctx, const char *cmd,
                                      const char *args, int flags)
 {
@@ -1195,7 +1195,7 @@ static commandResult_t CMD_NtcAlarmReset(const void *ctx, const char *cmd,
         g_ntc_alarm = 0u;
         PubCh(KWS_CH_NTC_ALARM, 0);   /* IMP-A: clear display alarm */
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: NTC alarm manually cleared (T=%.1fC) — use kws_relay_on to restore power",
+                  "KWS303WF: NTC alarm manually cleared (T=%.1fC) - use kws_relay_on to restore power",
                   g_ntc_ema);
     } else {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
@@ -1205,7 +1205,7 @@ static commandResult_t CMD_NtcAlarmReset(const void *ctx, const char *cmd,
 }
 
 /* ============================================================================
- * SECTION E — BUTTON MANAGER
+ * SECTION E - BUTTON MANAGER
  * ============================================================================ */
 #define BTN_MAX 4
 typedef struct { int pin; uint8_t last; uint8_t dbc; void (*cb)(void); } Btn_t;
@@ -1237,7 +1237,7 @@ static void btn_tick(void)
 }
 
 /* ============================================================================
- * SECTION F — EV SESSION
+ * SECTION F - EV SESSION
  * ============================================================================ */
 /* NOTE: KWS_VEH_* defines, EvSess_t typedef, g_ev and g_preferred_veh are
  * declared before SECTION C (see "EV SESSION TYPES" block above) because
@@ -1245,7 +1245,7 @@ static void btn_tick(void)
 
 /* BUG-14 FIX: s_sv was a static local inside sess_tick(); it persisted across
  * sess_end()/sess_start() cycles.  If s_sv was 59 when a session ended, the
- * 60-second periodic save fired 1 second into the new session — causing an
+ * 60-second periodic save fired 1 second into the new session - causing an
  * unnecessary flash write and leaving the timestamp 59 s ahead of the session
  * start.  Promoted to file scope and reset in sess_start() so the 60-second
  * save period always begins fresh with each new session.                     */
@@ -1272,7 +1272,7 @@ static bool sess_load(void)
     memset(&g_ev, 0, sizeof(g_ev));
     /* BUG-7 FIX: check fscanf return count.
      * A power cut mid-write leaves a truncated file. Partial reads leave
-     * zeros for missing fields — e.g. active=1 with zeroed wh_offset causes
+     * zeros for missing fields - e.g. active=1 with zeroed wh_offset causes
      * a phantom session resume with wrong vehicle/energy accounting.
      * Accept 9 fields for backward compat (start_up was added later). */
     int n = fscanf(f, "active=%u\nvehicle=%u\nid=%u\nwh_off=%f\nwh_sess=%f\n"
@@ -1285,7 +1285,7 @@ static bool sess_load(void)
     fclose(f);
     if (n < 9) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: sess_load corrupt (n=%d) — discarding", n);
+                  "KWS303WF: sess_load corrupt (n=%d) - discarding", n);
         memset(&g_ev, 0, sizeof(g_ev));
         return false;
     }
@@ -1327,21 +1327,21 @@ static uint8_t          g_mqtt_attempts         = 0;   /* WARN-1 FIX: cap retrie
 #define KWS_MQTT_MAX_ATTEMPTS  3   /* abandon after 3 WiFi-up attempts */
 
 /*
- * sess_mqtt() — v1.1.0
- * IMP-I: added co2_saved_g — grams CO2 avoided vs grid equivalent charging.
+ * sess_mqtt() - v1.1.0
+ * IMP-I: added co2_saved_g - grams CO2 avoided vs grid equivalent charging.
  * IMP-K: added reboot_count for uptime diagnostics in HA.
  * Worst-case payload recalculated:
  *   Before: 236 chars.  After: +22 chars (co2_saved_g + reboot_count) = 258 chars.
- *   258 < g_mqtt_pending_pl[320] ✓
+ *   258 < g_mqtt_pending_pl[320] OK
  */
 /*
- * sess_mqtt() — v1.2.0
+ * sess_mqtt() - v1.2.0
  * IMP-O: adds NTP ISO-8601 "ts" field when NTP is synced; "ts":null otherwise.
  * IMP-P: uses runtime g_veh2/4_km_pkwh / g_veh2/4_old_kmpl instead of
  *         compile-time KWS_VEH2/4_KM_PER_KWH / KWS_VEH2/4_OLD_KMPL.
  * Worst-case payload size after additions:
  *   IMP-O adds ts field: "\"ts\":\"2026-03-13T22:05:47\","  = +26 chars
- *   Previous max 258 + 26 = 284 chars < g_mqtt_pending_pl[320] ✓
+ *   Previous max 258 + 26 = 284 chars < g_mqtt_pending_pl[320] OK
  */
 static void sess_mqtt(void)
 {
@@ -1352,7 +1352,7 @@ static void sess_mqtt(void)
     float old_kl = (g_ev.vehicle==KWS_VEH_2W) ? g_veh2_old_kmpl : g_veh4_old_kmpl;
     float km     = kwh * km_pkw;
     float saved  = km / old_kl * KWS_PETROL_RS_PER_L - cost;
-    /* IMP-I: CO2 saved = (grid kWh equivalent) × grid emission factor. */
+    /* IMP-I: CO2 saved = (grid kWh equivalent) x grid emission factor. */
     float petrol_litres = (km > 0.0f && old_kl > 0.0f) ? (km / old_kl) : 0.0f;
     float co2_petrol_g  = petrol_litres * 2310.0f;
     float co2_ev_g      = kwh * KWS_CO2_GRID_G_PER_KWH;
@@ -1361,7 +1361,7 @@ static void sess_mqtt(void)
 
     float lifetime_now = g_lifetime_wh + kwh * 1000.0f;
 
-    /* IMP-O: NTP ISO-8601 timestamp — "YYYY-MM-DDTHH:MM:SS" or null. */
+    /* IMP-O: NTP ISO-8601 timestamp - "YYYY-MM-DDTHH:MM:SS" or null. */
     char ts_buf[26];   /* "2026-03-13T22:05:47" = 19 chars + quotes + null */
 #ifdef ENABLE_NTP
     if (NTP_IsSynced()) {
@@ -1425,11 +1425,11 @@ static void sess_summary(void)
 /* improvement #4: append one CSV row to history file
  * IMP-B: bounded at KWS_HISTORY_MAX_ROWS (200).  Before appending, count
  * existing newlines in one pass.  If at limit, log a warning and skip.
- * A single fgets loop on 200×80B = 16kB takes ~1ms — well within WDT budget.
+ * A single fgets loop on 200x80B = 16kB takes ~1ms - well within WDT budget.
  * The user can reclaim space with kws_history_clear if needed.            */
 static void history_append(void)
 {
-    /* ── IMP-B: count existing rows ────────────────────────────────── */
+    /* -- IMP-B: count existing rows ---------------------------------- */
     {
         FILE *fc = fopen(KWS_HISTORY_FILE, "r");
         if (fc) {
@@ -1443,7 +1443,7 @@ static void history_append(void)
             fclose(fc);
             if (rows >= KWS_HISTORY_MAX_ROWS) {
                 addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                          "KWS303WF: history full (%u rows) — "
+                          "KWS303WF: history full (%u rows) - "
                           "use kws_history_clear to reset",
                           (unsigned)rows);
                 return;
@@ -1520,7 +1520,7 @@ static void sess_tick(void)
         PubCh(KWS_CH_SESS_ELAPSED, (int)elapsed);
 
         /* BUG-14 FIX: use file-scope g_sess_sv (reset at sess_start) instead
-         * of static local — see comment at declaration above.               */
+         * of static local - see comment at declaration above.               */
         if (++g_sess_sv >= 60) {
             g_sess_sv = 0;
             sess_save();
@@ -1546,12 +1546,12 @@ static void sess_tick(void)
         break;
     case AD_DETECTING:
         if (w < g_detect_w_min) {
-            /* FIX-UX3: load below threshold — normal appliance or initial
+            /* FIX-UX3: load below threshold - normal appliance or initial
              * standby draw.  Return to IDLE.  g_adFast cleared so next
              * relay_close() starts a fresh fast window.                   */
             g_ad = AD_IDLE; g_adFast = 0;
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                      "KWS303WF: load below threshold (%.0fW < %.0fW) — no session started",
+                      "KWS303WF: load below threshold (%.0fW < %.0fW) - no session started",
                       w, g_detect_w_min);
             break;
         }
@@ -1568,7 +1568,7 @@ static void sess_tick(void)
                                   ? g_preferred_veh
                                   : ((avg < KWS_SPLIT_W) ? KWS_VEH_2W : KWS_VEH_4W);
                     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                              "KWS303WF: load confirmed (avg=%.0fW, %us window) → %s",
+                              "KWS303WF: load confirmed (avg=%.0fW, %us window) -> %s",
                               avg, (unsigned)confirm_s,
                               (veh==KWS_VEH_2W)?KWS_VEH2_NAME:KWS_VEH4_NAME);
                     sess_start(veh);
@@ -1585,7 +1585,7 @@ static void sess_tick(void)
 }
 
 /* ============================================================================
- * SECTION G — BUTTON CALLBACKS
+ * SECTION G - BUTTON CALLBACKS
  * ============================================================================ */
 /* FIX-UX3: on_toggle now implicitly starts/ends session via relay_close/open
  * arming the detect window and relay_open calling sess_end().            */
@@ -1594,24 +1594,24 @@ static void on_session(void)
 {
     /* FIX-UX3: [+] SESSION button semantics:
      *
-     * Case 1 — Relay open, no session:
+     * Case 1 - Relay open, no session:
      *   Close the relay.  This arms the fast detect window (5 s).  The user
-     *   pressing SESSION means "I want to charge now" — relay must be closed
+     *   pressing SESSION means "I want to charge now" - relay must be closed
      *   for any current to flow.  Session starts automatically after confirm.
      *
-     * Case 2 — Relay closed, session active:
+     * Case 2 - Relay closed, session active:
      *   Restart the session timer and energy offset without interrupting power.
      *   Useful if user plugged vehicle mid-session or wants to reset the counter.
      *
-     * Case 3 — Relay closed, no session (auto=off or load didn't qualify):
+     * Case 3 - Relay closed, no session (auto=off or load didn't qualify):
      *   Force-start a session immediately.  The user has explicitly decided this
-     *   load should be tracked — bypass the detect threshold entirely.
+     *   load should be tracked - bypass the detect threshold entirely.
      *
-     * Vehicle selection: active vehicle → g_preferred_veh → default 2W.     */
+     * Vehicle selection: active vehicle -> g_preferred_veh -> default 2W.     */
     if (!g_relay_closed) {
-        relay_close();   /* arms fast detect window — session starts after 5 s */
+        relay_close();   /* arms fast detect window - session starts after 5 s */
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: [+] relay closed — detect window armed");
+                  "KWS303WF: [+] relay closed - detect window armed");
         return;
     }
     /* Relay is closed: restart or force-start */
@@ -1626,18 +1626,18 @@ static void on_session(void)
               "KWS303WF: [+] session force-started (veh=%s)",
               (veh==KWS_VEH_2W)?KWS_VEH2_NAME:KWS_VEH4_NAME);
 }
-/* improvement #3 — [-] (P20) cycles vehicle profile.
+/* improvement #3 - [-] (P20) cycles vehicle profile.
  * Active session: ends current session and immediately restarts with the
- *   other vehicle type — history row is written for the partial session.
+ *   other vehicle type - history row is written for the partial session.
  * Idle: toggles g_preferred_veh so the next auto-detect session uses it.
- *       BUG-10 FIX: was a dead local static — now file-scope so auto-detect
+ *       BUG-10 FIX: was a dead local static - now file-scope so auto-detect
  *       and on_session() can actually read it.                              */
 static void on_reserved(void)
 {
     if (g_ev.active) {
         uint8_t new_veh = (g_ev.vehicle == KWS_VEH_2W) ? KWS_VEH_4W : KWS_VEH_2W;
         addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-                  "KWS303WF: [-] vehicle %s → %s (session restart)",
+                  "KWS303WF: [-] vehicle %s -> %s (session restart)",
                   (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
                   (new_veh   ==KWS_VEH_2W)   ? KWS_VEH2_NAME : KWS_VEH4_NAME);
         sess_end();
@@ -1651,7 +1651,7 @@ static void on_reserved(void)
 }
 
 /* ============================================================================
- * SECTION H — CONSOLE COMMANDS
+ * SECTION H - CONSOLE COMMANDS
  * ============================================================================ */
 static commandResult_t CMD_RelayOn (const void*x,const char*c,const char*a,int f){relay_close();return CMD_RES_OK;}
 static commandResult_t CMD_RelayOff(const void*x,const char*c,const char*a,int f){relay_open(); return CMD_RES_OK;}
@@ -1660,7 +1660,7 @@ static commandResult_t CMD_Ch8Set(const void*x,const char*c,const char*a,int f)
 { if(!a||!*a)return CMD_RES_NOT_ENOUGH_ARGUMENTS; relay_sync(atoi(a)); return CMD_RES_OK; }
 
 /*
- * CMD_Rate() — v1.1.0
+ * CMD_Rate() - v1.1.0
  * IMP-G: now calls rate_save() after setting so the tariff persists across reboots.
  */
 static commandResult_t CMD_Rate(const void*x,const char*c,const char*a,int f)
@@ -1697,7 +1697,7 @@ static commandResult_t CMD_DetectW(const void*x,const char*c,const char*a,int f)
 /* improvement #4: dump history CSV over log
  * IMP-F: capped at KWS_HISTORY_DUMP_ROWS recent rows.  On a large file,
  * unlimited addLogAdv() calls can stall the UART FIFO long enough to trigger
- * the ~5 s WDT.  50 rows × ~80 chars each ≈ 4 kB output — safe.          */
+ * the ~5 s WDT.  50 rows x ~80 chars each ~= 4 kB output - safe.          */
 #define KWS_HISTORY_DUMP_ROWS  50u
 static commandResult_t CMD_HistoryDump(const void*x,const char*c,const char*a,int f)
 {
@@ -1787,7 +1787,7 @@ static commandResult_t CMD_SessAuto(const void*x,const char*c,const char*a,int f
 {
     g_auto_en = !g_auto_en;
     if (!g_auto_en && g_ad != AD_CHARGING) {
-        /* FIX-UX3: turning auto off while detect window is pending — reset
+        /* FIX-UX3: turning auto off while detect window is pending - reset
          * to IDLE.  If already AD_CHARGING a session is running; leave it.  */
         g_ad = AD_IDLE; g_adFast = 0;
     }
@@ -1818,12 +1818,12 @@ static commandResult_t CMD_Lifetime(const void*x,const char*c,const char*a,int f
 }
 
 /* ============================================================================
- * SECTION I — OPENBK LIFECYCLE
+ * SECTION I - OPENBK LIFECYCLE
  * ============================================================================ */
 
 /* Device short-name set via kws_ha_devname command.
  * Must match the OBK MQTT client ID / Short Name (shown in web UI header,
- * e.g. "obkAB12CD").  Placed here — before KWS303WF_Init — so the compiler
+ * e.g. "obkAB12CD").  Placed here - before KWS303WF_Init - so the compiler
  * sees the definition before CMD_RegisterCommand references it. */
 static char g_ha_devname[40] = "";
 
@@ -1841,15 +1841,15 @@ static commandResult_t CMD_HaDevname(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ── IMP-H: kws_protect — get/set and persist OV/UV/OC thresholds ────────
- * Usage: kws_protect              → print current thresholds
- *        kws_protect ov <V>       → set over-voltage trip
- *        kws_protect uv <V>       → set under-voltage trip
- *        kws_protect oc <A>       → set over-current trip
+/* -- IMP-H: kws_protect - get/set and persist OV/UV/OC thresholds --------
+ * Usage: kws_protect              -> print current thresholds
+ *        kws_protect ov <V>       -> set over-voltage trip
+ *        kws_protect uv <V>       -> set under-voltage trip
+ *        kws_protect oc <A>       -> set over-current trip
  * All changes are saved to kws_protection.cfg immediately.
  * NOTE: Thresholds are logged here and written to file.  Applying them to
  * the HT7017 registers requires a restart (HT7017_Init re-reads them via
- * the protect_load() → g_ov/uv/oc_thr → passed to HT7017 at Init).      */
+ * the protect_load() -> g_ov/uv/oc_thr -> passed to HT7017 at Init).      */
 static commandResult_t CMD_Protect(const void *ctx, const char *cmd,
                                    const char *args, int flags)
 {
@@ -1882,13 +1882,13 @@ static commandResult_t CMD_Protect(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ── IMP-J: kws_daily_reset — manually reset the daily kWh accumulator ───
+/* -- IMP-J: kws_daily_reset - manually reset the daily kWh accumulator ---
  * Useful when integrating with NTP-based midnight CALENDAR_EVENTs.        */
 static commandResult_t CMD_DailyReset(const void *ctx, const char *cmd,
                                       const char *args, int flags)
 {
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: daily reset — was %.3f kWh", g_daily_kwh);
+              "KWS303WF: daily reset - was %.3f kWh", g_daily_kwh);
     g_daily_kwh          = 0.0f;
     g_daily_start_uptime = g_uptime_s;
     g_daily_mqtt_sent    = 0u;
@@ -1896,9 +1896,9 @@ static commandResult_t CMD_DailyReset(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ── IMP-L: kws_heartbeat — get/set heartbeat interval ───────────────────
- * Usage: kws_heartbeat            → print current interval
- *        kws_heartbeat <seconds>  → set new interval (0 = disable)       */
+/* -- IMP-L: kws_heartbeat - get/set heartbeat interval -------------------
+ * Usage: kws_heartbeat            -> print current interval
+ *        kws_heartbeat <seconds>  -> set new interval (0 = disable)       */
 static commandResult_t CMD_Heartbeat(const void *ctx, const char *cmd,
                                      const char *args, int flags)
 {
@@ -1908,7 +1908,7 @@ static commandResult_t CMD_Heartbeat(const void *ctx, const char *cmd,
                   (unsigned)KWS_HEARTBEAT_S, KWS_HEARTBEAT_TOPIC);
         return CMD_RES_OK;
     }
-    /* Note: interval is compile-time constant KWS_HEARTBEAT_S — runtime
+    /* Note: interval is compile-time constant KWS_HEARTBEAT_S - runtime
      * change resets the counter so next publish fires in <new_interval>. */
     g_hb_tick = 0u;
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
@@ -1917,7 +1917,7 @@ static commandResult_t CMD_Heartbeat(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ── IMP-M: kws_faults_dump — print fault log to UART console ────────────
+/* -- IMP-M: kws_faults_dump - print fault log to UART console ------------
  * Reads kws_faults.log and prints each row, capped at KWS_FAULT_MAX_ROWS.
  * Format per row: uptime_s, code, value.                                  */
 static commandResult_t CMD_FaultsDump(const void *ctx, const char *cmd,
@@ -1945,7 +1945,7 @@ static commandResult_t CMD_FaultsDump(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* IMP-M: kws_faults_clear — truncate fault log (zero it out). */
+/* IMP-M: kws_faults_clear - truncate fault log (zero it out). */
 static commandResult_t CMD_FaultsClear(const void *ctx, const char *cmd,
                                        const char *args, int flags)
 {
@@ -1956,13 +1956,13 @@ static commandResult_t CMD_FaultsClear(const void *ctx, const char *cmd,
 }
 
 
-/* ── IMP-P: kws_veh_config — get/set per-vehicle runtime efficiency ───────
- * Usage: kws_veh_config                           → print current values
- *        kws_veh_config 2w <km/kWh> <oldkmpl>    → set 2-wheeler factors
- *        kws_veh_config 4w <km/kWh> <oldkmpl>    → set 4-wheeler factors
+/* -- IMP-P: kws_veh_config - get/set per-vehicle runtime efficiency -------
+ * Usage: kws_veh_config                           -> print current values
+ *        kws_veh_config 2w <km/kWh> <oldkmpl>    -> set 2-wheeler factors
+ *        kws_veh_config 4w <km/kWh> <oldkmpl>    -> set 4-wheeler factors
  * All changes are persisted to kws_vehicles.cfg immediately.
  * Example: kws_veh_config 2w 28.5 38.0
- *          → Ather 450X, 28.5 km/kWh; old Activa at 38 km/L petrol        */
+ *          -> Ather 450X, 28.5 km/kWh; old Activa at 38 km/L petrol        */
 static commandResult_t CMD_VehConfig(const void *ctx, const char *cmd,
                                      const char *args, int flags)
 {
@@ -2003,13 +2003,13 @@ static commandResult_t CMD_VehConfig(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ── IMP-Q: kws_schedule — get/set/enable/disable off-peak window ─────────
- * Usage: kws_schedule                     → print current state
- *        kws_schedule enable              → activate scheduling
- *        kws_schedule disable             → deactivate (always allow)
- *        kws_schedule <start_h> <end_h>   → set window hours (enables too)
+/* -- IMP-Q: kws_schedule - get/set/enable/disable off-peak window ---------
+ * Usage: kws_schedule                     -> print current state
+ *        kws_schedule enable              -> activate scheduling
+ *        kws_schedule disable             -> deactivate (always allow)
+ *        kws_schedule <start_h> <end_h>   -> set window hours (enables too)
  * Hours are integers 0-23 (24h clock).  Midnight-crossing supported.
- * Example: kws_schedule 22 6   → charge window 22:00 PM to 06:00 AM
+ * Example: kws_schedule 22 6   -> charge window 22:00 PM to 06:00 AM
  * Note: requires NTP to be running (startDriver NTP in autoexec.bat).     */
 static commandResult_t CMD_Schedule(const void *ctx, const char *cmd,
                                     const char *args, int flags)
@@ -2069,15 +2069,15 @@ static commandResult_t CMD_Schedule(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ── IMP-R: kws_tou — get/set/clear time-of-use tariff tiers ─────────────
- * Usage: kws_tou                              → print current tiers
- *        kws_tou add <start_h> <end_h> <rate> → add a tier
- *        kws_tou clear                        → remove all tiers (use base rate)
+/* -- IMP-R: kws_tou - get/set/clear time-of-use tariff tiers -------------
+ * Usage: kws_tou                              -> print current tiers
+ *        kws_tou add <start_h> <end_h> <rate> -> add a tier
+ *        kws_tou clear                        -> remove all tiers (use base rate)
  * Hours 0-23.  Rate in Rs/kWh.  Max KWS_RATE_TIER_MAX (3) tiers.
  * Changes persist immediately to kws_rate.cfg (appended after base rate).
- * Example: kws_tou add 22 6 5.50    → off-peak tier 10PM-6AM at Rs 5.50
- *          kws_tou add 9 17 9.50    → peak tier 9AM-5PM at Rs 9.50
- * Note: first matching tier wins — order tiers from most-specific to broadest.
+ * Example: kws_tou add 22 6 5.50    -> off-peak tier 10PM-6AM at Rs 5.50
+ *          kws_tou add 9 17 9.50    -> peak tier 9AM-5PM at Rs 9.50
+ * Note: first matching tier wins - order tiers from most-specific to broadest.
  * Base rate (kws_rate <val>) remains as fallback when no tier matches.    */
 static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
                                const char *args, int flags)
@@ -2085,7 +2085,7 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
     if (!args || !*args) {
         if (g_rate_tiers_n == 0u) {
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                      "kws_tou: TOU disabled — single rate Rs%.4f/kWh", g_rate_rs);
+                      "kws_tou: TOU disabled - single rate Rs%.4f/kWh", g_rate_rs);
         } else {
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                       "kws_tou: %u tier(s), base=Rs%.4f/kWh",
@@ -2101,7 +2101,7 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
 #ifdef ENABLE_NTP
             if (NTP_IsSynced()) {
                 addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                          "  current hour=%02d → active rate=Rs%.4f/kWh",
+                          "  current hour=%02d -> active rate=Rs%.4f/kWh",
                           NTP_GetHour(), current_rate());
             }
 #endif
@@ -2112,7 +2112,7 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
         g_rate_tiers_n = 0u;
         tou_save();
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: TOU cleared — single rate Rs%.4f/kWh active", g_rate_rs);
+                  "KWS303WF: TOU cleared - single rate Rs%.4f/kWh active", g_rate_rs);
         return CMD_RES_OK;
     }
     /* Parse "add SH EH RATE" */
@@ -2128,7 +2128,7 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
     }
     if (g_rate_tiers_n >= KWS_RATE_TIER_MAX) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_tou: max %u tiers reached — use kws_tou clear first",
+                  "kws_tou: max %u tiers reached - use kws_tou clear first",
                   (unsigned)KWS_RATE_TIER_MAX);
         return CMD_RES_BAD_ARGUMENT;
     }
@@ -2146,13 +2146,14 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
 }
 
 /*
- * KWS303WF_Init() — v1.2.0
+ * KWS303WF_Init() - v1.2.0
  * IMP-G: rate_load() restores persisted tariff.
  * IMP-H: protect_load() restores OV/UV/OC thresholds.
  * IMP-J: daily_load() restores today's accumulated kWh.
  * IMP-K: increments g_reboot_count and persists immediately after lifetime_load().
- * IMP-L: g_hb_tick initialised to 0 — first heartbeat fires after KWS_HEARTBEAT_S s.
+ * IMP-L: g_hb_tick initialised to 0 - first heartbeat fires after KWS_HEARTBEAT_S s.
  * IMP-P: vehicles_load() restores per-vehicle efficiency factors.
+ */
 
 void KWS303WF_Init(void)
 {
@@ -2193,12 +2194,12 @@ void KWS303WF_Init(void)
     /* IMP-R: restore TOU tariff tiers (reads extra lines from kws_rate.cfg). */
     tou_load();
 
-    /* IMP-L: heartbeat counter starts at 0 — first publish fires after
+    /* IMP-L: heartbeat counter starts at 0 - first publish fires after
      * KWS_HEARTBEAT_S seconds; no publish on cold boot to avoid flood. */
     g_hb_tick = 0u;
 
 
-    /* NTC init — seed on first ntc_tick() call */
+    /* NTC init - seed on first ntc_tick() call */
     g_ntc_seeded    = 0u;
     g_ntc_alarm     = 0u;
     g_ntc_in_fast   = 0u;
@@ -2298,28 +2299,28 @@ void KWS303WF_Init(void)
 }
 
 /*
- * KWS303WF_RunEverySecond() — v1.2.0
- * IMP-J: daily_tick() — detects 24 h boundary, publishes daily MQTT summary, resets accumulator.
- * IMP-L: heartbeat_tick() — publishes compact status MQTT every KWS_HEARTBEAT_S seconds.
- * IMP-M: ht7017_alarm_tick() — logs HT7017 electrical alarms (OV/UV/OC/OP) to kws_faults.log.
- * IMP-O: NTP timestamp is evaluated per-session in sess_mqtt() — no RunEverySecond work needed.
- * IMP-Q: sched_window_active() is evaluated at relay_close() call time — no tick needed.
- * IMP-R: current_rate() is evaluated at sess_start() — no tick needed.
+ * KWS303WF_RunEverySecond() - v1.2.0
+ * IMP-J: daily_tick() - detects 24 h boundary, publishes daily MQTT summary, resets accumulator.
+ * IMP-L: heartbeat_tick() - publishes compact status MQTT every KWS_HEARTBEAT_S seconds.
+ * IMP-M: ht7017_alarm_tick() - logs HT7017 electrical alarms (OV/UV/OC/OP) to kws_faults.log.
+ * IMP-O: NTP timestamp is evaluated per-session in sess_mqtt() - no RunEverySecond work needed.
+ * IMP-Q: sched_window_active() is evaluated at relay_close() call time - no tick needed.
+ * IMP-R: current_rate() is evaluated at sess_start() - no tick needed.
  */
 
-/* ── IMP-J: daily kWh tick ────────────────────────────────────────────────
+/* -- IMP-J: daily kWh tick ------------------------------------------------
  * Called once per second from RunEverySecond().
- * Midnight detection: when uptime has advanced by ≥ 86400 s from
+ * Midnight detection: when uptime has advanced by >= 86400 s from
  * g_daily_start_uptime, we treat that as a new day.  This is not wall-clock
  * midnight but it is robust across reboots and does not require NTP.
  * If NTP is available the user can call kws_daily_reset via autoexec at
- * midnight using OBK's CALENDAR_EVENT feature (not done here — stays simple).*/
+ * midnight using OBK's CALENDAR_EVENT feature (not done here - stays simple).*/
 static void daily_tick(void)
 {
     /* Check if 24 h have elapsed since the last day-start. */
     if ((g_uptime_s - g_daily_start_uptime) < 86400u) return;
 
-    /* Midnight boundary crossed — publish daily summary, then reset. */
+    /* Midnight boundary crossed - publish daily summary, then reset. */
     float kwh = g_daily_kwh;
 
     if (!g_daily_mqtt_sent && ReadCh(KWS_CH_WIFI) != 0) {
@@ -2342,17 +2343,17 @@ static void daily_tick(void)
     daily_save();
 }
 
-/* ── IMP-L: MQTT heartbeat/keepalive tick ────────────────────────────────
+/* -- IMP-L: MQTT heartbeat/keepalive tick --------------------------------
  * Publishes a compact JSON status payload every KWS_HEARTBEAT_S seconds.
- * Keeps HA entities alive between sessions (HA default expiry = 10× publish).
- * Payload ≤ 140 bytes — a separate buffer avoids clobbering g_mqtt_pending_pl.
+ * Keeps HA entities alive between sessions (HA default expiry = 10x publish).
+ * Payload <= 140 bytes - a separate buffer avoids clobbering g_mqtt_pending_pl.
  * Guard: WiFi must be up; no attempt cap (if broker down, try next interval). */
 static void heartbeat_tick(void)
 {
     if (++g_hb_tick < KWS_HEARTBEAT_S) return;
     g_hb_tick = 0u;
 
-    if (ReadCh(KWS_CH_WIFI) == 0) return;   /* defer — no WiFi */
+    if (ReadCh(KWS_CH_WIFI) == 0) return;   /* defer - no WiFi */
 
     char pl[160];
     snprintf(pl, sizeof(pl),
@@ -2369,8 +2370,8 @@ static void heartbeat_tick(void)
     CMD_ExecuteCommand(cmd, 0);
 }
 
-/* ── IMP-M: HT7017 electrical alarm fault logger ─────────────────────────
- * Reads Ch7 every second.  On rising edge (0→non-zero) logs a fault entry.
+/* -- IMP-M: HT7017 electrical alarm fault logger -------------------------
+ * Reads Ch7 every second.  On rising edge (0->non-zero) logs a fault entry.
  * Ch7 values: 1=OV, 2=UV, 3=OC, 4=OP.  The autoexec ChangeHandler opens the
  * relay; we just need to persist the event.
  * Uses a previous-alarm state to log only the transition, not every second.*/
@@ -2380,7 +2381,7 @@ static void ht7017_alarm_tick(void)
     int alarm = ReadCh(7);   /* Ch7 = HT7017 alarm code */
     uint8_t cur = (alarm > 0 && alarm <= 4) ? (uint8_t)alarm : 0u;
     if (cur != 0u && cur != s_prev_alarm) {
-        /* Rising edge or change in alarm code — log it. */
+        /* Rising edge or change in alarm code - log it. */
         float val = 0.0f;
         switch (cur) {
             case 1: val = (float)ReadCh(KWS_CH_RELAY); /* use voltage Ch1 */ val = (float)ReadCh(1) / 100.0f; break;
@@ -2403,18 +2404,18 @@ void KWS303WF_RunEverySecond(void)
         /* WARN-1 FIX: two-part guard.
          * (a) WiFi down: defer until connected. Flag stays set.
          * (b) WiFi up but broker unreachable: publishMQTT may block up to
-         *     TCP timeout (~20 s) → WDT fires. Cap at KWS_MQTT_MAX_ATTEMPTS
+         *     TCP timeout (~20 s) -> WDT fires. Cap at KWS_MQTT_MAX_ATTEMPTS
          *     so a permanently-unreachable broker does not cause repeated WDT
          *     reboots. Flag cleared AFTER the call (not before) so a WDT
-         *     reboot (static zero-init) is safe — message is lost but no loop. */
+         *     reboot (static zero-init) is safe - message is lost but no loop. */
         if (ReadCh(KWS_CH_WIFI) == 0) {
             addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-                      "KWS303WF: MQTT publish deferred — WiFi down");
+                      "KWS303WF: MQTT publish deferred - WiFi down");
         } else if (g_mqtt_attempts >= KWS_MQTT_MAX_ATTEMPTS) {
             g_mqtt_pending  = 0;
             g_mqtt_attempts = 0;
             addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-                      "KWS303WF: MQTT abandoned after %u attempts — broker unreachable?",
+                      "KWS303WF: MQTT abandoned after %u attempts - broker unreachable?",
                       (unsigned)KWS_MQTT_MAX_ATTEMPTS);
         } else {
             char cmd[400];
@@ -2429,7 +2430,7 @@ void KWS303WF_RunEverySecond(void)
     relay_sync(ReadCh(KWS_CH_RELAY));
     sess_tick();
 
-    /* NTC: 9 out of 10 calls cost ~0.1 µs (countdown decrement only).
+    /* NTC: 9 out of 10 calls cost ~0.1 ?s (countdown decrement only).
      * ADC + Steinhart-Hart + EMA + state machine runs on sample ticks only. */
     ntc_tick();
 
@@ -2447,18 +2448,18 @@ void KWS303WF_RunEverySecond(void)
 /* ============================================================================
  * QUICK TICK (~10 ms, called from DRV_RunQuickTick by OBK core)
  *
- * Improvement #Q1 — RunQuickTick for buttons + relay coil de-energise.
+ * Improvement #Q1 - RunQuickTick for buttons + relay coil de-energise.
  *
  * WHY: btn_tick() uses a 3-consecutive-read debounce. When called from
  * RunEverySecond (1 Hz) a button press takes 3+ seconds to register.
- * At the ~10 ms quick-tick rate the same 3-tick debounce window is ~30 ms —
+ * At the ~10 ms quick-tick rate the same 3-tick debounce window is ~30 ms -
  * imperceptible to the user.
  *
  * relay_pulse_tick() de-energises the coil after g_pulse_off_at seconds.
  * g_uptime_s is still incremented in RunEverySecond (second resolution),
  * so the comparison g_uptime_s >= g_pulse_off_at remains correct; the coil
  * is now released within the first quick-tick AFTER the second boundary
- * (~0–10 ms overshoot) instead of 0–1 s.
+ * (~0-10 ms overshoot) instead of 0-1 s.
  * ============================================================================ */
 void KWS303WF_RunQuickTick(void)
 {
@@ -2469,14 +2470,14 @@ void KWS303WF_RunQuickTick(void)
 /* ============================================================================
  * HOME ASSISTANT MQTT AUTO-DISCOVERY
  *
- * Improvement #H2 — publish HA MQTT discovery payloads for all 13 channels.
+ * Improvement #H2 - publish HA MQTT discovery payloads for all 13 channels.
  *
  * HOW TO USE:
  *   1. In autoexec.bat (or the OBK web console), set your device short-name
- *      once — it must match your OBK "Short Name" (shown in the web UI header,
+ *      once - it must match your OBK "Short Name" (shown in the web UI header,
  *      e.g. "obkAB12CD"):
  *          kws_ha_devname obkAB12CD
- *   2. Trigger HA discovery from the OBK web UI (MQTT → HA Discovery button).
+ *   2. Trigger HA discovery from the OBK web UI (MQTT -> HA Discovery button).
  *
  * WHY g_ha_devname:
  *   The HA discovery state_topic must match the OBK channel publish topic:
@@ -2486,7 +2487,7 @@ void KWS303WF_RunQuickTick(void)
  *   instead to avoid unverified symbol dependencies.
  *
  * PUBLISH MODE:
- *   publishMQTT <topic> <payload> 1  — 3rd arg '1' = raw topic, OBK does NOT
+ *   publishMQTT <topic> <payload> 1  - 3rd arg '1' = raw topic, OBK does NOT
  *   prepend the devname.  Required for "homeassistant/..." discovery topics.
  *
  * Channels published (13 total, BUG-19 FIX: was "14 total", actual count is 13):
@@ -2512,12 +2513,12 @@ void KWS303WF_OnHassDiscovery(const char *topic)
 {
     if (g_ha_devname[0] == '\0') {
         addLogAdv(LOG_WARN, LOG_FEATURE_ENERGY,
-                  "KWS303WF: HA discovery skipped — set devname first: "
+                  "KWS303WF: HA discovery skipped - set devname first: "
                   "kws_ha_devname <your-obk-shortname>");
         return;
     }
 
-    /* Shared device block — groups all 13 entities under one HA device card
+    /* Shared device block - groups all 13 entities under one HA device card
      * (BUG-19 FIX: was 14 entities; actual count is 13).                    */
     char dev_block[256];
     snprintf(dev_block, sizeof(dev_block),
@@ -2532,7 +2533,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
     char uid[72];
     char cfg[560];
 
-/* Macro for simple numeric sensors — reduces repetition. */
+/* Macro for simple numeric sensors - reduces repetition. */
 #define HA_SENSOR(label, sfx, ch_num, unit, dev_cls, tmpl, s_cls)        \
     do {                                                                   \
         snprintf(uid, sizeof(uid), "%s_" sfx, dev);                       \
@@ -2548,32 +2549,32 @@ void KWS303WF_OnHassDiscovery(const char *topic)
         ha_pub(topic, "sensor", uid, cfg);                                 \
     } while (0)
 
-    /* Ch1 Voltage  (integer = V × 100)   */
+    /* Ch1 Voltage  (integer = V x 100)   */
     HA_SENSOR("Voltage",      "voltage",      "1",  "V",
               "voltage",      "{{value|float/100}}",    "measurement");
-    /* Ch2 Current  (integer = A × 1000)  */
+    /* Ch2 Current  (integer = A x 1000)  */
     HA_SENSOR("Current",      "current",      "2",  "A",
               "current",      "{{value|float/1000}}",   "measurement");
-    /* Ch3 Power    (integer = W × 10)    */
+    /* Ch3 Power    (integer = W x 10)    */
     HA_SENSOR("Power",        "power",        "3",  "W",
               "power",        "{{value|float/10}}",     "measurement");
-    /* Ch4 Frequency (integer = Hz × 100) */
+    /* Ch4 Frequency (integer = Hz x 100) */
     HA_SENSOR("Frequency",    "frequency",    "4",  "Hz",
               "frequency",    "{{value|float/100}}",    "measurement");
-    /* Ch5 Power Factor (integer = PF × 1000) */
+    /* Ch5 Power Factor (integer = PF x 1000) */
     HA_SENSOR("Power Factor", "power_factor", "5",  "",
               "power_factor", "{{value|float/1000}}",   "measurement");
-    /* Ch6 Energy   (integer = Wh × 10 → publish as kWh) */
+    /* Ch6 Energy   (integer = Wh x 10 -> publish as kWh) */
     HA_SENSOR("Energy",       "energy",       "6",  "kWh",
               "energy",       "{{value|float/10000}}", "total_increasing");
-    /* Ch9 Temperature (integer = °C × 100) */
+    /* Ch9 Temperature (integer = degC x 100) */
     HA_SENSOR("Temperature",  "temperature",  "9",  "\xC2\xB0\x43",
               "temperature",  "{{value|float/100}}",    "measurement");
 
 #undef HA_SENSOR
 
-    /* Ch10 — EV Session Cost (integer = Rs × 100).
-     * No HA standard device_class for currency — use icon only. */
+    /* Ch10 - EV Session Cost (integer = Rs x 100).
+     * No HA standard device_class for currency - use icon only. */
     snprintf(uid, sizeof(uid), "%s_ev_cost", dev);
     snprintf(cfg, sizeof(cfg),
              "{\"name\":\"EV Session Cost\","
@@ -2586,7 +2587,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
              uid, dev, dev_block);
     ha_pub(topic, "sensor", uid, cfg);
 
-    /* Ch13 — Session Elapsed (integer = seconds since sess_start) */
+    /* Ch13 - Session Elapsed (integer = seconds since sess_start) */
     snprintf(uid, sizeof(uid), "%s_session_elapsed", dev);
     snprintf(cfg, sizeof(cfg),
              "{\"name\":\"EV Session Elapsed\","
@@ -2598,7 +2599,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
              uid, dev, dev_block);
     ha_pub(topic, "sensor", uid, cfg);
 
-    /* Ch7 — Alarm binary_sensor (0=OK, any non-zero = problem tripped) */
+    /* Ch7 - Alarm binary_sensor (0=OK, any non-zero = problem tripped) */
     snprintf(uid, sizeof(uid), "%s_alarm", dev);
     snprintf(cfg, sizeof(cfg),
              "{\"name\":\"Alarm\","
@@ -2610,7 +2611,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
              uid, dev, dev_block);
     ha_pub(topic, "binary_sensor", uid, cfg);
 
-    /* Ch12 — EV Session Active binary_sensor */
+    /* Ch12 - EV Session Active binary_sensor */
     snprintf(uid, sizeof(uid), "%s_session_active", dev);
     snprintf(cfg, sizeof(cfg),
              "{\"name\":\"EV Session Active\","
@@ -2621,7 +2622,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
              uid, dev, dev_block);
     ha_pub(topic, "binary_sensor", uid, cfg);
 
-    /* Ch8 — Relay switch (0 = open/off, 100 = closed/on) */
+    /* Ch8 - Relay switch (0 = open/off, 100 = closed/on) */
     snprintf(uid, sizeof(uid), "%s_relay", dev);
     snprintf(cfg, sizeof(cfg),
              "{\"name\":\"Relay\","
@@ -2634,7 +2635,7 @@ void KWS303WF_OnHassDiscovery(const char *topic)
              uid, dev, dev, dev_block);
     ha_pub(topic, "switch", uid, cfg);
 
-    /* Ch14 — NTC Thermal Alarm binary_sensor (IMP-A)
+    /* Ch14 - NTC Thermal Alarm binary_sensor (IMP-A)
      * 0=normal, 1=alarm latched (relay was opened by over-temperature trip).
      * HA device_class "heat" gives the flame icon and "problem" logic.      */
     snprintf(uid, sizeof(uid), "%s_ntc_alarm", dev);
