@@ -99,6 +99,12 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdbool.h>
+/* IMP-O: OBK NTP driver — provides NTP_IsSynced(), NTP_GetHour/Min/Sec/Day/Month/Year().
+ * Guarded by ENABLE_NTP which is set for PLATFORM_BEKEN in obk_config.h.
+ * If NTP is not synced, sess_mqtt() falls back to "uptime_s" field only.   */
+#ifdef ENABLE_NTP
+#include "../drv/drv_ntp.h"
+#endif
 
 #ifndef LOG_FEATURE_ENERGY
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
@@ -238,6 +244,32 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_PROTECT_FILE     "kws_protection.cfg"  /* IMP-H: persisted OV/UV/OC thresholds */
 #define KWS_DAILY_FILE       "kws_daily.cfg"       /* IMP-J: daily kWh counter + reset ts  */
 #define KWS_FAULTS_FILE      "kws_faults.log"      /* IMP-M: last-N fault log              */
+/* IMP-P: per-vehicle runtime efficiency — loaded/saved via kws_vehicles.cfg.
+ * Format: "veh2_km=XX.X\nveh4_km=XX.X\n"
+ * Allows user to tune kWh→km conversion for their specific vehicle.        */
+#define KWS_VEHICLES_FILE    "kws_vehicles.cfg"    /* IMP-P: per-vehicle efficiency factors */
+/* IMP-Q: off-peak charge scheduling — loaded/saved via kws_schedule.cfg.
+ * Format: "enabled=1\nstart=22\nend=6\n"  (hour integers, 0-23, 24h clock)
+ * When enabled, relay is only allowed to close during [start, end) window.
+ * Wraps midnight correctly (e.g. 22:00 → 06:00).                          */
+#define KWS_SCHEDULE_FILE    "kws_schedule.cfg"    /* IMP-Q: off-peak window config        */
+
+/* ── IMP-Q: off-peak scheduling defaults ─────────────────────────────────
+ * KWS_SCHED_DEFAULT_START   Default window start hour (10 PM)
+ * KWS_SCHED_DEFAULT_END     Default window end hour   (6 AM)
+ * Disabled by default — user must run kws_schedule enable to activate.    */
+#define KWS_SCHED_DEFAULT_START  22u   /* hour 0-23 — default window opens at 22:00 */
+#define KWS_SCHED_DEFAULT_END     6u   /* hour 0-23 — default window closes at 06:00 */
+
+/* ── IMP-R: multi-tier time-of-use tariff ────────────────────────────────
+ * Up to KWS_RATE_TIER_MAX time-of-use slots, each with hour range + rate.
+ * Stored as an extension of kws_rate.cfg:
+ *   rate=7.00          (base/fallback rate, always present)
+ *   tiers=2            (number of active TOU tiers, 0 = disabled)
+ *   tier0=22,6,5.00    (start_h, end_h, Rs/kWh)
+ *   tier1=9,17,9.50    (peak hours)
+ * When tiers=0, single g_rate_rs is used as before.                       */
+#define KWS_RATE_TIER_MAX    3u   /* max TOU tiers — 3 covers peak/off-peak/standard */
 
 /* ── IMP-G: electricity rate persistence ─────────────────────────────────
  * Rate is loaded from KWS_RATE_FILE at Init().  Saved via kws_rate <val>. */
@@ -286,13 +318,6 @@ static FILE *robust_fopen_w(const char *path)
  * The user clears with kws_faults_clear.                                  */
 #define KWS_FAULT_MAX_ROWS   20u
 
-/* ── IMP-N: display dim/sleep ────────────────────────────────────────────
- * KWS_DISPLAY_DIM_S   Seconds of button inactivity before backlight off.
- *                     Any button press wakes the display immediately.
- *                     Set to 0 to disable (backlight always on).
- * KWS_DISPLAY_DIM_DEFAULT 300 = 5 min — sensible default for a wall-mount
- *                     device that may be unattended for hours.            */
-#define KWS_DISPLAY_DIM_DEFAULT  300u  /* seconds idle before backlight off  */
 
 static uint32_t g_sess_sv = 0;
 
@@ -367,13 +392,36 @@ static uint32_t g_reboot_count = 0u;   /* loaded from kws_lifetime.cfg     */
  * g_hb_tick  counts seconds; triggers a publish when it reaches KWS_HEARTBEAT_S. */
 static uint32_t g_hb_tick = 0u;
 
-/* ── IMP-N: display dim/sleep ────────────────────────────────────────────
- * g_dim_timeout  seconds idle before backlight off (0 = disabled).
- * g_last_btn_s   g_uptime_s at the last button press (any button).
- * g_display_on   current backlight state (1=on, 0=off by dim timeout).    */
-static uint32_t g_dim_timeout = KWS_DISPLAY_DIM_DEFAULT;
-static uint32_t g_last_btn_s  = 0u;
-static uint8_t  g_display_on  = 1u;
+/* ── IMP-P: per-vehicle runtime efficiency factors ───────────────────────
+ * Runtime equivalents of the compile-time KWS_VEH2/4_KM_PER_KWH defines.
+ * Loaded from KWS_VEHICLES_FILE; set via kws_veh_config command.
+ * Initialised to compile-time defaults so the firmware works out of the box
+ * without the file existing.                                               */
+static float g_veh2_km_pkwh = KWS_VEH2_KM_PER_KWH; /* 2-wheeler km per kWh */
+static float g_veh4_km_pkwh = KWS_VEH4_KM_PER_KWH; /* 4-wheeler km per kWh */
+static float g_veh2_old_kmpl = KWS_VEH2_OLD_KMPL;  /* 2-wheeler petrol km/L */
+static float g_veh4_old_kmpl = KWS_VEH4_OLD_KMPL;  /* 4-wheeler petrol km/L */
+
+/* ── IMP-Q: off-peak scheduling state ───────────────────────────────────
+ * g_sched_enabled  1 = scheduling active; relay blocked outside window.
+ * g_sched_start    Hour (0-23) when the charge window opens.
+ * g_sched_end      Hour (0-23) when the charge window closes.
+ * g_sched_blocked  1 = relay was auto-blocked this tick; log once.        */
+static uint8_t  g_sched_enabled = 0u;               /* off by default        */
+static uint8_t  g_sched_start   = KWS_SCHED_DEFAULT_START;
+static uint8_t  g_sched_end     = KWS_SCHED_DEFAULT_END;
+static uint8_t  g_sched_blocked = 0u;               /* for log dedup         */
+
+/* ── IMP-R: time-of-use tariff tiers ────────────────────────────────────
+ * Array of up to KWS_RATE_TIER_MAX active TOU tiers.
+ * g_rate_tiers_n = 0 means disabled — falls back to g_rate_rs.           */
+typedef struct {
+    uint8_t start_h;   /* hour window opens  (0-23) */
+    uint8_t end_h;     /* hour window closes (0-23) — wraps midnight if start > end */
+    float   rate_rs;   /* Rs/kWh for this window */
+} RateTier_t;
+static RateTier_t g_rate_tiers[KWS_RATE_TIER_MAX];
+static uint8_t    g_rate_tiers_n = 0u;  /* active tier count; 0 = TOU disabled */
 
 /*
  * lifetime_load() — v1.1.0
@@ -531,8 +579,198 @@ static void daily_save(void)
     fclose(f);
 }
 
-/* ── IMP-M: fault log ────────────────────────────────────────────────────
- * IMP-M: fault_log() — append one fault event to kws_faults.log.
+/* ── IMP-P: per-vehicle efficiency persistence ───────────────────────────
+ * IMP-P: vehicles_load() — restore per-vehicle km/kWh factors from flash.
+ * Falls back silently to compile-time defaults if file is missing/corrupt. */
+static void vehicles_load(void)
+{
+    FILE *f = fopen(KWS_VEHICLES_FILE, "r");
+    if (!f) return;
+    float v2 = 0.0f, v4 = 0.0f, p2 = 0.0f, p4 = 0.0f;
+    int n = fscanf(f, "veh2_km=%f\nveh4_km=%f\nveh2_kmpl=%f\nveh4_kmpl=%f\n",
+                   &v2, &v4, &p2, &p4);
+    fclose(f);
+    /* Require all four values; all must be finite and positive. */
+    if (n != 4 || !(v2 > 0.0f) || !(v4 > 0.0f) || !(p2 > 0.0f) || !(p4 > 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: vehicles file invalid (n=%d) — using defaults", n);
+        return;
+    }
+    g_veh2_km_pkwh  = v2;
+    g_veh4_km_pkwh  = v4;
+    g_veh2_old_kmpl = p2;
+    g_veh4_old_kmpl = p4;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: vehicles loaded 2W=%.1fkm/kWh(%.1fkmpl) 4W=%.1fkm/kWh(%.1fkmpl)",
+              g_veh2_km_pkwh, g_veh2_old_kmpl, g_veh4_km_pkwh, g_veh4_old_kmpl);
+}
+
+/* IMP-P: vehicles_save() — persist current efficiency factors. */
+static void vehicles_save(void)
+{
+    FILE *f = robust_fopen_w(KWS_VEHICLES_FILE);
+    if (!f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: vehicles_save failed — %s", KWS_VEHICLES_FILE);
+        return;
+    }
+    fprintf(f, "veh2_km=%.2f\nveh4_km=%.2f\nveh2_kmpl=%.2f\nveh4_kmpl=%.2f\n",
+            g_veh2_km_pkwh, g_veh4_km_pkwh, g_veh2_old_kmpl, g_veh4_old_kmpl);
+    fclose(f);
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: vehicles saved 2W=%.1fkm/kWh 4W=%.1fkm/kWh",
+              g_veh2_km_pkwh, g_veh4_km_pkwh);
+}
+
+/* ── IMP-Q: off-peak schedule persistence ────────────────────────────────
+ * IMP-Q: schedule_load() — restore scheduling config from flash.          */
+static void schedule_load(void)
+{
+    FILE *f = fopen(KWS_SCHEDULE_FILE, "r");
+    if (!f) return;
+    unsigned int en = 0u, sh = 0u, eh = 0u;
+    int n = fscanf(f, "enabled=%u\nstart=%u\nend=%u\n", &en, &sh, &eh);
+    fclose(f);
+    if (n != 3 || sh > 23u || eh > 23u) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: schedule file invalid (n=%d) — disabled", n);
+        return;
+    }
+    g_sched_enabled = (uint8_t)(en ? 1u : 0u);
+    g_sched_start   = (uint8_t)sh;
+    g_sched_end     = (uint8_t)eh;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: schedule loaded enabled=%u window=%02u:00-%02u:00",
+              (unsigned)g_sched_enabled, (unsigned)g_sched_start, (unsigned)g_sched_end);
+}
+
+/* IMP-Q: schedule_save() — persist scheduling config. */
+static void schedule_save(void)
+{
+    FILE *f = robust_fopen_w(KWS_SCHEDULE_FILE);
+    if (!f) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: schedule_save failed — %s", KWS_SCHEDULE_FILE);
+        return;
+    }
+    fprintf(f, "enabled=%u\nstart=%u\nend=%u\n",
+            (unsigned)g_sched_enabled, (unsigned)g_sched_start, (unsigned)g_sched_end);
+    fclose(f);
+}
+
+/* IMP-Q: sched_window_active() — returns 1 if current NTP hour is inside the
+ * configured charge window.  Handles midnight-wrap (e.g. 22→06).
+ * Returns 1 (allow) when NTP is not synced — fail-safe, don't block charging
+ * just because the clock isn't set yet.                                    */
+static uint8_t sched_window_active(void)
+{
+    if (!g_sched_enabled) return 1u;   /* scheduling off — always allow     */
+#ifdef ENABLE_NTP
+    if (!NTP_IsSynced()) return 1u;    /* no time yet — fail open           */
+    int h = NTP_GetHour();
+    uint8_t sh = g_sched_start;
+    uint8_t eh = g_sched_end;
+    if (sh <= eh) {
+        /* Same-day window e.g. 08:00-12:00 */
+        return (h >= sh && h < eh) ? 1u : 0u;
+    } else {
+        /* Midnight-crossing window e.g. 22:00-06:00 */
+        return (h >= sh || h < eh) ? 1u : 0u;
+    }
+#else
+    return 1u;   /* no NTP compiled in — always allow */
+#endif
+}
+
+/* ── IMP-R: TOU tariff persistence ──────────────────────────────────────
+ * IMP-R: tou_load() — parse kws_rate.cfg for tier lines added by kws_tou.
+ * The base rate= line is already read by rate_load(); this reads extra tier
+ * lines from the same file in a second pass (avoids a separate file).
+ * Format appended to kws_rate.cfg:
+ *   tiers=N
+ *   tier0=SH,EH,RATE
+ *   tier1=SH,EH,RATE
+ *   ...                                                                    */
+static void tou_load(void)
+{
+    FILE *f = fopen(KWS_RATE_FILE, "r");
+    if (!f) return;
+    char line[64];
+    uint8_t n = 0u;
+    g_rate_tiers_n = 0u;
+    while (fgets(line, sizeof(line), f) && n < KWS_RATE_TIER_MAX) {
+        unsigned int sh = 0u, eh = 0u;
+        float rate = 0.0f;
+        /* tier lines: "tierN=SH,EH,RATE" */
+        if (sscanf(line, "tier%*u=%u,%u,%f", &sh, &eh, &rate) == 3
+            && sh <= 23u && eh <= 23u && rate > 0.0f) {
+            g_rate_tiers[n].start_h = (uint8_t)sh;
+            g_rate_tiers[n].end_h   = (uint8_t)eh;
+            g_rate_tiers[n].rate_rs = rate;
+            n++;
+        }
+    }
+    fclose(f);
+    g_rate_tiers_n = n;
+    if (n > 0u) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: TOU loaded %u tier(s)", (unsigned)n);
+    }
+}
+
+/* IMP-R: tou_save() — append tier lines to kws_rate.cfg after the base rate.
+ * Rewrites the whole file so previous tier lines are replaced, not appended. */
+static void tou_save(void)
+{
+    FILE *f = robust_fopen_w(KWS_RATE_FILE);
+    if (!f) return;
+    fprintf(f, "rate=%.4f\n", g_rate_rs);
+    fprintf(f, "tiers=%u\n", (unsigned)g_rate_tiers_n);
+    for (uint8_t i = 0u; i < g_rate_tiers_n; i++) {
+        fprintf(f, "tier%u=%u,%u,%.4f\n",
+                (unsigned)i,
+                (unsigned)g_rate_tiers[i].start_h,
+                (unsigned)g_rate_tiers[i].end_h,
+                g_rate_tiers[i].rate_rs);
+    }
+    fclose(f);
+}
+
+/* IMP-R: rate_for_hour() — returns the applicable Rs/kWh for the given hour.
+ * Iterates active TOU tiers; returns g_rate_rs if none matches or tiers=0.
+ * Handles midnight-crossing windows identically to sched_window_active().  */
+static float rate_for_hour(int h)
+{
+    uint8_t i;
+    for (i = 0u; i < g_rate_tiers_n; i++) {
+        uint8_t sh = g_rate_tiers[i].start_h;
+        uint8_t eh = g_rate_tiers[i].end_h;
+        int in_window;
+        if (sh <= eh) {
+            in_window = (h >= (int)sh && h < (int)eh);
+        } else {
+            in_window = (h >= (int)sh || h < (int)eh);
+        }
+        if (in_window) return g_rate_tiers[i].rate_rs;
+    }
+    return g_rate_rs;   /* base/fallback rate */
+}
+
+/* IMP-O+R: current_rate() — returns applicable rate using NTP hour if available.
+ * Used by sess_tick() to price each second correctly under TOU.
+ * Falls back to g_rate_rs if NTP is not synced or TOU is disabled.        */
+static float current_rate(void)
+{
+    if (g_rate_tiers_n == 0u) return g_rate_rs;
+#ifdef ENABLE_NTP
+    if (!NTP_IsSynced()) return g_rate_rs;
+    return rate_for_hour(NTP_GetHour());
+#else
+    return g_rate_rs;
+#endif
+}
+
+
  * Capped at KWS_FAULT_MAX_ROWS to prevent unbounded flash growth.
  * alarm_code: 1=OV, 2=UV, 3=OC, 4=OP (power), 5=THM (NTC)
  * uptime_s: caller provides g_uptime_s for the timestamp.               */
@@ -543,7 +781,7 @@ static void fault_log(uint8_t alarm_code, uint32_t uptime_s, float value)
         FILE *fc = fopen(KWS_FAULTS_FILE, "r");
         if (fc) {
             uint32_t rows = 0u;
-            char tmp[4];
+            char tmp[96];   /* PERF-1: was [4] — fault rows are "uptime,code,value\n" ~30 chars */
             while (fgets(tmp, sizeof(tmp), fc)) {
                 if (tmp[0] != '\0' && strchr(tmp, '\n')) rows++;
             }
@@ -616,11 +854,9 @@ static uint32_t g_pulse_off_at = 0;
  * referenced in SECTION C and G.
  * relay_open() calls sess_end() (FIX-UX1).
  * on_session() calls sess_start() and sess_end() (FIX-UX3).
- * IMP-N: dim_wake() defined in RunEverySecond section but called by button
  * handlers in SECTION G — forward-declare to satisfy C99 single-pass rule. */
 static void sess_start(uint8_t veh);
 static void sess_end(void);
-static void dim_wake(void);   /* IMP-N: wake display on button press */
 
 static void relay_pulse_tick(void)
 {
@@ -659,8 +895,34 @@ static void relay_open(void)
     g_endTk  = 0;
 }
 
+/*
+ * relay_close() — v1.2.0
+ * IMP-Q: off-peak schedule gate added.  If scheduling is enabled and NTP is
+ * synced and we are outside the configured window, the relay close is vetoed.
+ * The relay stays open; a log message is printed once (g_sched_blocked dedup).
+ * The user can bypass by running kws_relay_on or disabling with kws_schedule.
+ */
 static void relay_close(void)
 {
+    /* IMP-Q: schedule gate — veto relay close outside the charge window. */
+    if (!sched_window_active()) {
+        if (!g_sched_blocked) {
+            g_sched_blocked = 1u;
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "KWS303WF: relay close BLOCKED by schedule "
+                      "(window %02u:00-%02u:00, now=%02u:xx) — "
+                      "use kws_schedule disable to bypass",
+                      (unsigned)g_sched_start, (unsigned)g_sched_end,
+#ifdef ENABLE_NTP
+                      NTP_IsSynced() ? (unsigned)NTP_GetHour() : 99u
+#else
+                      99u
+#endif
+                      );
+        }
+        return;
+    }
+    g_sched_blocked = 0u;  /* reset dedup on a successful close */
     relay_pulse_start(KWS_RELAY_PIN_ON);
     g_relay_closed = 1;
     PubCh(KWS_CH_RELAY, 100);
@@ -1044,7 +1306,7 @@ static void sess_start(uint8_t veh)
     g_ev.seg_count       = 1;
     g_ev.peak_w          = 0.0f;
     g_ev.peak_a          = 0.0f;
-    g_ev.rate_rs         = g_rate_rs;
+    g_ev.rate_rs         = current_rate();  /* IMP-R: TOU-aware rate at session start */
     g_ev.start_uptime_s  = g_uptime_s;   /* improvement #2: record start time */
     g_ev.duration_s      = 0;
     g_sess_sv            = 0;            /* BUG-14 FIX: reset 60s save timer  */
@@ -1070,40 +1332,63 @@ static uint8_t          g_mqtt_attempts         = 0;   /* WARN-1 FIX: cap retrie
  *   Before: 236 chars.  After: +22 chars (co2_saved_g + reboot_count) = 258 chars.
  *   258 < g_mqtt_pending_pl[320] ✓
  */
+/*
+ * sess_mqtt() — v1.2.0
+ * IMP-O: adds NTP ISO-8601 "ts" field when NTP is synced; "ts":null otherwise.
+ * IMP-P: uses runtime g_veh2/4_km_pkwh / g_veh2/4_old_kmpl instead of
+ *         compile-time KWS_VEH2/4_KM_PER_KWH / KWS_VEH2/4_OLD_KMPL.
+ * Worst-case payload size after additions:
+ *   IMP-O adds ts field: "\"ts\":\"2026-03-13T22:05:47\","  = +26 chars
+ *   Previous max 258 + 26 = 284 chars < g_mqtt_pending_pl[320] ✓
+ */
 static void sess_mqtt(void)
 {
     float kwh    = g_ev.wh_session / 1000.0f;
     float cost   = kwh * g_ev.rate_rs;
-    float km_pkw = (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_KM_PER_KWH : KWS_VEH4_KM_PER_KWH;
-    float old_kl = (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_OLD_KMPL    : KWS_VEH4_OLD_KMPL;
+    /* IMP-P: use runtime per-vehicle factors instead of compile-time constants */
+    float km_pkw = (g_ev.vehicle==KWS_VEH_2W) ? g_veh2_km_pkwh  : g_veh4_km_pkwh;
+    float old_kl = (g_ev.vehicle==KWS_VEH_2W) ? g_veh2_old_kmpl : g_veh4_old_kmpl;
     float km     = kwh * km_pkw;
     float saved  = km / old_kl * KWS_PETROL_RS_PER_L - cost;
-    /* IMP-I: CO2 saved = (grid kWh equivalent) × grid emission factor.
-     * We compare grid charging energy (kwh) vs the grid equivalent of the
-     * petrol alternative.  Net saving is grid_kwh - 0 (EV emits grid CO2);
-     * comparison basis is petrol: km / old_kl litres × ~2.31 kg CO2/litre.
-     * Simplified: co2_saved_g = petrol_litres × 2310 - kwh × KWS_CO2_GRID_G_PER_KWH */
+    /* IMP-I: CO2 saved = (grid kWh equivalent) × grid emission factor. */
     float petrol_litres = (km > 0.0f && old_kl > 0.0f) ? (km / old_kl) : 0.0f;
-    float co2_petrol_g  = petrol_litres * 2310.0f;    /* ~2310 g CO2/litre petrol  */
+    float co2_petrol_g  = petrol_litres * 2310.0f;
     float co2_ev_g      = kwh * KWS_CO2_GRID_G_PER_KWH;
     float co2_saved_g   = co2_petrol_g - co2_ev_g;
-    if (co2_saved_g < 0.0f) co2_saved_g = 0.0f;  /* clamp: no negative saving */
+    if (co2_saved_g < 0.0f) co2_saved_g = 0.0f;
 
     float lifetime_now = g_lifetime_wh + kwh * 1000.0f;
+
+    /* IMP-O: NTP ISO-8601 timestamp — "YYYY-MM-DDTHH:MM:SS" or null. */
+    char ts_buf[26];   /* "2026-03-13T22:05:47" = 19 chars + quotes + null */
+#ifdef ENABLE_NTP
+    if (NTP_IsSynced()) {
+        snprintf(ts_buf, sizeof(ts_buf), "\"%04d-%02d-%02dT%02d:%02d:%02d\"",
+                 NTP_GetYear(), NTP_GetMonth(),  NTP_GetDay(),
+                 NTP_GetHour(), NTP_GetMinute(), NTP_GetSecond());
+    } else {
+        snprintf(ts_buf, sizeof(ts_buf), "null");
+    }
+#else
+    snprintf(ts_buf, sizeof(ts_buf), "null");
+#endif
+
     snprintf(g_mqtt_pending_pl, sizeof(g_mqtt_pending_pl),
              "{\"vehicle\":\"%s\",\"kwh\":%.3f,\"cost_rs\":%.2f,"
              "\"km\":%.1f,\"saved_rs\":%.2f,\"segments\":%u,"
              "\"peak_w\":%.1f,\"peak_a\":%.3f,"
              "\"duration_s\":%u,\"uptime_s\":%u,"
              "\"ntc_alarm\":%u,\"lifetime_kwh\":%.3f,"
-             "\"co2_saved_g\":%u,\"reboot_count\":%u}",
+             "\"co2_saved_g\":%u,\"reboot_count\":%u,"
+             "\"ts\":%s}",
              (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
              kwh, cost, km, saved, g_ev.seg_count,
              g_ev.peak_w, g_ev.peak_a,
              (unsigned)g_ev.duration_s, (unsigned)g_uptime_s,
              (unsigned)g_ntc_alarm,
              lifetime_now / 1000.0f,
-             (unsigned)co2_saved_g, (unsigned)g_reboot_count);
+             (unsigned)co2_saved_g, (unsigned)g_reboot_count,
+             ts_buf);
     g_mqtt_pending  = 1;
     g_mqtt_attempts = 0;
 }
@@ -1112,8 +1397,9 @@ static void sess_summary(void)
 {
     float kwh  = g_ev.wh_session / 1000.0f;
     float cost = kwh * g_ev.rate_rs;
-    float km   = kwh * ((g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_KM_PER_KWH : KWS_VEH4_KM_PER_KWH);
-    float pet  = km  / ((g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_OLD_KMPL   : KWS_VEH4_OLD_KMPL)
+    /* IMP-P: use runtime per-vehicle efficiency factors */
+    float km   = kwh * ((g_ev.vehicle==KWS_VEH_2W) ? g_veh2_km_pkwh  : g_veh4_km_pkwh);
+    float pet  = km  / ((g_ev.vehicle==KWS_VEH_2W) ? g_veh2_old_kmpl : g_veh4_old_kmpl)
                      * KWS_PETROL_RS_PER_L;
     uint32_t hh = g_ev.duration_s / 3600u;
     uint32_t mm = (g_ev.duration_s % 3600u) / 60u;
@@ -1146,7 +1432,7 @@ static void history_append(void)
         FILE *fc = fopen(KWS_HISTORY_FILE, "r");
         if (fc) {
             uint32_t rows = 0;
-            char tmp[4];                   /* just need newline detection  */
+            char tmp[128];                 /* PERF-1: was [4], enlarged to hold a full CSV row */
             while (fgets(tmp, sizeof(tmp), fc)) {
                 /* fgets returns the partial last line too; only count
                  * lines that end in '\n' = complete rows.               */
@@ -1166,7 +1452,8 @@ static void history_append(void)
     if (!f) return;
     float kwh  = g_ev.wh_session / 1000.0f;
     float cost = kwh * g_ev.rate_rs;
-    float km   = kwh * ((g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_KM_PER_KWH : KWS_VEH4_KM_PER_KWH);
+    /* IMP-P: use runtime per-vehicle efficiency factors */
+    float km   = kwh * ((g_ev.vehicle==KWS_VEH_2W) ? g_veh2_km_pkwh : g_veh4_km_pkwh);
     fprintf(f, "%u,%s,%.3f,%.2f,%.1f,%u,%u,%.1f,%.3f\n",
             g_ev.session_id,
             (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
@@ -1300,11 +1587,9 @@ static void sess_tick(void)
  * ============================================================================ */
 /* FIX-UX3: on_toggle now implicitly starts/ends session via relay_close/open
  * arming the detect window and relay_open calling sess_end().
- * IMP-N: dim_wake() called first on all button handlers — any press wakes display. */
-static void on_toggle(void)   { dim_wake(); if (g_relay_closed) relay_open(); else relay_close(); }
+static void on_toggle(void)   { if (g_relay_closed) relay_open(); else relay_close(); }
 static void on_session(void)
 {
-    dim_wake();   /* IMP-N: any button press wakes display */
     /* FIX-UX3: [+] SESSION button semantics:
      *
      * Case 1 — Relay open, no session:
@@ -1347,7 +1632,6 @@ static void on_session(void)
  *       and on_session() can actually read it.                              */
 static void on_reserved(void)
 {
-    dim_wake();   /* IMP-N: any button press wakes display */
     if (g_ev.active) {
         uint8_t new_veh = (g_ev.vehicle == KWS_VEH_2W) ? KWS_VEH_4W : KWS_VEH_2W;
         addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
@@ -1669,42 +1953,401 @@ static commandResult_t CMD_FaultsClear(const void *ctx, const char *cmd,
     return CMD_RES_OK;
 }
 
-/* ── IMP-N: kws_dim — get/set display dim timeout ────────────────────────
- * Usage: kws_dim              → print current timeout
- *        kws_dim <seconds>    → set idle timeout (0 = disable, always on) */
-static commandResult_t CMD_Dim(const void *ctx, const char *cmd,
-                               const char *args, int flags)
+
+/* ── IMP-P: kws_veh_config — get/set per-vehicle runtime efficiency ───────
+ * Usage: kws_veh_config                           → print current values
+ *        kws_veh_config 2w <km/kWh> <oldkmpl>    → set 2-wheeler factors
+ *        kws_veh_config 4w <km/kWh> <oldkmpl>    → set 4-wheeler factors
+ * All changes are persisted to kws_vehicles.cfg immediately.
+ * Example: kws_veh_config 2w 28.5 38.0
+ *          → Ather 450X, 28.5 km/kWh; old Activa at 38 km/L petrol        */
+static commandResult_t CMD_VehConfig(const void *ctx, const char *cmd,
+                                     const char *args, int flags)
 {
     if (!args || !*args) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_dim: timeout=%u s (%s), idle=%u s, display=%s",
-                  (unsigned)g_dim_timeout,
-                  g_dim_timeout==0?"disabled":"enabled",
-                  (unsigned)(g_uptime_s - g_last_btn_s),
-                  g_display_on?"ON":"OFF");
+                  "kws_veh_config: 2W=%.2fkm/kWh(old=%.1fkmpl) "
+                  "4W=%.2fkm/kWh(old=%.1fkmpl)",
+                  g_veh2_km_pkwh, g_veh2_old_kmpl,
+                  g_veh4_km_pkwh, g_veh4_old_kmpl);
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "  compile defaults: 2W=%.1f 4W=%.1f",
+                  (float)KWS_VEH2_KM_PER_KWH, (float)KWS_VEH4_KM_PER_KWH);
         return CMD_RES_OK;
     }
-    g_dim_timeout = (uint32_t)atoi(args);
-    /* If disabling, immediately restore display if it was dimmed. */
-    if (g_dim_timeout == 0u && !g_display_on) {
-        CMD_ExecuteCommand("st7735_brightness 1", 0);
-        g_display_on = 1u;
+    char key[4] = {0};
+    float km_pkwh = 0.0f, old_kmpl = 0.0f;
+    if (sscanf(args, "%3s %f %f", key, &km_pkwh, &old_kmpl) != 3
+        || !(km_pkwh > 0.0f) || !(old_kmpl > 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_veh_config usage: kws_veh_config 2w|4w <km/kWh> <oldkmpl>");
+        return CMD_RES_BAD_ARGUMENT;
     }
-    /* Reset idle counter so dim doesn't fire immediately after re-enabling. */
-    g_last_btn_s = g_uptime_s;
+    if (strcmp(key, "2w") == 0 || strcmp(key, "2W") == 0) {
+        g_veh2_km_pkwh  = km_pkwh;
+        g_veh2_old_kmpl = old_kmpl;
+    } else if (strcmp(key, "4w") == 0 || strcmp(key, "4W") == 0) {
+        g_veh4_km_pkwh  = km_pkwh;
+        g_veh4_old_kmpl = old_kmpl;
+    } else {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_veh_config: unknown type '%s' (use 2w or 4w)", key);
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    vehicles_save();
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "KWS303WF: dim timeout set to %u s", (unsigned)g_dim_timeout);
+              "kws_veh_config: %s set to %.2fkm/kWh old=%.1fkmpl (saved)",
+              key, km_pkwh, old_kmpl);
+    return CMD_RES_OK;
+}
+
+/* ── IMP-Q: kws_schedule — get/set/enable/disable off-peak window ─────────
+ * Usage: kws_schedule                     → print current state
+ *        kws_schedule enable              → activate scheduling
+ *        kws_schedule disable             → deactivate (always allow)
+ *        kws_schedule <start_h> <end_h>   → set window hours (enables too)
+ * Hours are integers 0-23 (24h clock).  Midnight-crossing supported.
+ * Example: kws_schedule 22 6   → charge window 22:00 PM to 06:00 AM
+ * Note: requires NTP to be running (startDriver NTP in autoexec.bat).     */
+static commandResult_t CMD_Schedule(const void *ctx, const char *cmd,
+                                    const char *args, int flags)
+{
+    if (!args || !*args) {
+#ifdef ENABLE_NTP
+        int synced = NTP_IsSynced();
+        int h = synced ? NTP_GetHour() : -1;
+        uint8_t active = sched_window_active();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: enabled=%u window=%02u:00-%02u:00 "
+                  "ntp=%s current_h=%d in_window=%u",
+                  (unsigned)g_sched_enabled,
+                  (unsigned)g_sched_start, (unsigned)g_sched_end,
+                  synced ? "synced" : "NOT_SYNCED", h,
+                  (unsigned)active);
+#else
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: enabled=%u window=%02u:00-%02u:00 (no NTP)",
+                  (unsigned)g_sched_enabled,
+                  (unsigned)g_sched_start, (unsigned)g_sched_end);
+#endif
+        return CMD_RES_OK;
+    }
+    if (strcmp(args, "enable") == 0) {
+        g_sched_enabled = 1u;
+        g_sched_blocked = 0u;
+        schedule_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: schedule ENABLED window=%02u:00-%02u:00",
+                  (unsigned)g_sched_start, (unsigned)g_sched_end);
+        return CMD_RES_OK;
+    }
+    if (strcmp(args, "disable") == 0) {
+        g_sched_enabled = 0u;
+        g_sched_blocked = 0u;
+        schedule_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: schedule DISABLED");
+        return CMD_RES_OK;
+    }
+    /* Parse "START END" hour pair */
+    unsigned int sh = 0u, eh = 0u;
+    if (sscanf(args, "%u %u", &sh, &eh) != 2 || sh > 23u || eh > 23u) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule usage: kws_schedule enable|disable|<start_h 0-23> <end_h 0-23>");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    g_sched_start   = (uint8_t)sh;
+    g_sched_end     = (uint8_t)eh;
+    g_sched_enabled = 1u;   /* setting a window implicitly enables scheduling */
+    g_sched_blocked = 0u;
+    schedule_save();
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: schedule window set %02u:00-%02u:00 (enabled, saved)",
+              (unsigned)g_sched_start, (unsigned)g_sched_end);
+    return CMD_RES_OK;
+}
+
+/* ── IMP-R: kws_tou — get/set/clear time-of-use tariff tiers ─────────────
+ * Usage: kws_tou                              → print current tiers
+ *        kws_tou add <start_h> <end_h> <rate> → add a tier
+ *        kws_tou clear                        → remove all tiers (use base rate)
+ * Hours 0-23.  Rate in Rs/kWh.  Max KWS_RATE_TIER_MAX (3) tiers.
+ * Changes persist immediately to kws_rate.cfg (appended after base rate).
+ * Example: kws_tou add 22 6 5.50    → off-peak tier 10PM-6AM at Rs 5.50
+ *          kws_tou add 9 17 9.50    → peak tier 9AM-5PM at Rs 9.50
+ * Note: first matching tier wins — order tiers from most-specific to broadest.
+ * Base rate (kws_rate <val>) remains as fallback when no tier matches.    */
+static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
+                               const char *args, int flags)
+{
+    if (!args || !*args) {
+        if (g_rate_tiers_n == 0u) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "kws_tou: TOU disabled — single rate Rs%.4f/kWh", g_rate_rs);
+        } else {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "kws_tou: %u tier(s), base=Rs%.4f/kWh",
+                      (unsigned)g_rate_tiers_n, g_rate_rs);
+            for (uint8_t i = 0u; i < g_rate_tiers_n; i++) {
+                addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                          "  tier%u: %02u:00-%02u:00  Rs%.4f/kWh",
+                          (unsigned)i,
+                          (unsigned)g_rate_tiers[i].start_h,
+                          (unsigned)g_rate_tiers[i].end_h,
+                          g_rate_tiers[i].rate_rs);
+            }
+#ifdef ENABLE_NTP
+            if (NTP_IsSynced()) {
+                addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                          "  current hour=%02d → active rate=Rs%.4f/kWh",
+                          NTP_GetHour(), current_rate());
+            }
+#endif
+        }
+        return CMD_RES_OK;
+    }
+    if (strcmp(args, "clear") == 0) {
+        g_rate_tiers_n = 0u;
+        tou_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: TOU cleared — single rate Rs%.4f/kWh active", g_rate_rs);
+        return CMD_RES_OK;
+    }
+    /* Parse "add SH EH RATE" */
+    unsigned int sh = 0u, eh = 0u;
+    float rate = 0.0f;
+    char sub[8] = {0};
+    if (sscanf(args, "%7s %u %u %f", sub, &sh, &eh, &rate) != 4
+        || strcmp(sub, "add") != 0
+        || sh > 23u || eh > 23u || !(rate > 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_tou usage: kws_tou [add <start_h> <end_h> <rate>|clear]");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    if (g_rate_tiers_n >= KWS_RATE_TIER_MAX) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_tou: max %u tiers reached — use kws_tou clear first",
+                  (unsigned)KWS_RATE_TIER_MAX);
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    uint8_t i = g_rate_tiers_n;
+    g_rate_tiers[i].start_h = (uint8_t)sh;
+    g_rate_tiers[i].end_h   = (uint8_t)eh;
+    g_rate_tiers[i].rate_rs = rate;
+    g_rate_tiers_n++;
+    tou_save();
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: TOU tier%u added %02u:00-%02u:00 Rs%.4f/kWh (saved, %u tier(s) total)",
+              (unsigned)i, (unsigned)sh, (unsigned)eh, rate,
+              (unsigned)g_rate_tiers_n);
     return CMD_RES_OK;
 }
 
 /*
- * KWS303WF_Init() — v1.1.0
+ * KWS303WF_Init() — v1.2.0
  * IMP-G: rate_load() restores persisted tariff.
  * IMP-H: protect_load() restores OV/UV/OC thresholds.
  * IMP-J: daily_load() restores today's accumulated kWh.
  * IMP-K: increments g_reboot_count and persists immediately after lifetime_load().
- * IMP-L/N: g_hb_tick, g_last_btn_s, g_display_on initialised to safe defaults.
+    /* IMP-L: g_hb_tick initialised to 0 — first heartbeat fires after KWS_HEARTBEAT_S s. */
+ * IMP-P: vehicles_load() restores per-vehicle efficiency factors.
+ * IMP-Q: schedule_load() restores off-peak window config.
+ * IMP-R: tou_load() restores TOU tariff tiers from kws_rate.cfg.
  */
+
+/* ── IMP-P: kws_veh_config — get/set runtime vehicle efficiency factors ──
+ * Usage: kws_veh_config                       → print current values
+ *        kws_veh_config 2w <km/kWh> [km/L]   → set 2-wheeler factors
+ *        kws_veh_config 4w <km/kWh> [km/L]   → set 4-wheeler factors
+ * km/L (old petrol efficiency) is optional; omit to keep current value.   */
+static commandResult_t CMD_VehConfig(const void *ctx, const char *cmd,
+                                     const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_veh_config:"
+                  "  2W: %.2f km/kWh  %.2f km/L(petrol)"
+                  "  4W: %.2f km/kWh  %.2f km/L(petrol)",
+                  g_veh2_km_pkwh, g_veh2_old_kmpl,
+                  g_veh4_km_pkwh, g_veh4_old_kmpl);
+        return CMD_RES_OK;
+    }
+    char  type[4] = {0};
+    float km_pkwh = 0.0f, km_pl = 0.0f;
+    int n = sscanf(args, "%3s %f %f", type, &km_pkwh, &km_pl);
+    if (n < 2 || !(km_pkwh > 0.0f)) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_veh_config usage: kws_veh_config 2w|4w <km/kWh> [km/L]");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    /* km/L is optional — only update if provided (n==3) and positive. */
+    int is2w = (strcmp(type,"2w")==0 || strcmp(type,"2W")==0);
+    int is4w = (strcmp(type,"4w")==0 || strcmp(type,"4W")==0);
+    if (!is2w && !is4w) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_veh_config: type must be 2w or 4w");
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    if (is2w) {
+        g_veh2_km_pkwh = km_pkwh;
+        if (n == 3 && km_pl > 0.0f) g_veh2_old_kmpl = km_pl;
+    } else {
+        g_veh4_km_pkwh = km_pkwh;
+        if (n == 3 && km_pl > 0.0f) g_veh4_old_kmpl = km_pl;
+    }
+    vehicles_save();
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "kws_veh_config: %s set %.2f km/kWh %.2f km/L (saved)",
+              is2w ? "2W" : "4W",
+              is2w ? g_veh2_km_pkwh : g_veh4_km_pkwh,
+              is2w ? g_veh2_old_kmpl : g_veh4_old_kmpl);
+    return CMD_RES_OK;
+}
+
+/* ── IMP-Q: kws_schedule — get/set/enable/disable off-peak schedule ──────
+ * Usage: kws_schedule                     → print current config
+ *        kws_schedule enable              → activate scheduling
+ *        kws_schedule disable             → deactivate (relay always allowed)
+ *        kws_schedule start <hour>        → set window open hour (0-23)
+ *        kws_schedule end   <hour>        → set window close hour (0-23)
+ *        kws_schedule window <SH> <EH>   → set both hours at once
+ * All changes are persisted to kws_schedule.cfg immediately.              */
+static commandResult_t CMD_Schedule(const void *ctx, const char *cmd,
+                                    const char *args, int flags)
+{
+    if (!args || !*args) {
+        /* Print state + NTP-aware window status */
+        char ntp_status[24] = "NTP unknown";
+#ifdef ENABLE_NTP
+        if (NTP_IsSynced())
+            snprintf(ntp_status, sizeof(ntp_status), "now=%02d:00", NTP_GetHour());
+        else
+            snprintf(ntp_status, sizeof(ntp_status), "NTP not synced");
+#endif
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: enabled=%u window=%02u:00-%02u:00 "
+                  "active=%u %s",
+                  (unsigned)g_sched_enabled,
+                  (unsigned)g_sched_start, (unsigned)g_sched_end,
+                  (unsigned)sched_window_active(), ntp_status);
+        return CMD_RES_OK;
+    }
+
+    char sub[16] = {0};
+    unsigned int v1 = 0u, v2 = 0u;
+    sscanf(args, "%15s %u %u", sub, &v1, &v2);
+
+    if (strcmp(sub,"enable")==0) {
+        g_sched_enabled = 1u; g_sched_blocked = 0u; schedule_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: enabled (window %02u:00-%02u:00)",
+                  (unsigned)g_sched_start, (unsigned)g_sched_end);
+    } else if (strcmp(sub,"disable")==0) {
+        g_sched_enabled = 0u; g_sched_blocked = 0u; schedule_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "kws_schedule: disabled");
+    } else if (strcmp(sub,"start")==0) {
+        if (v1 > 23u) return CMD_RES_BAD_ARGUMENT;
+        g_sched_start = (uint8_t)v1; schedule_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: window start set to %02u:00", v1);
+    } else if (strcmp(sub,"end")==0) {
+        if (v1 > 23u) return CMD_RES_BAD_ARGUMENT;
+        g_sched_end = (uint8_t)v1; schedule_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: window end set to %02u:00", v1);
+    } else if (strcmp(sub,"window")==0) {
+        if (v1 > 23u || v2 > 23u) return CMD_RES_BAD_ARGUMENT;
+        g_sched_start = (uint8_t)v1;
+        g_sched_end   = (uint8_t)v2;
+        schedule_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: window set %02u:00-%02u:00", v1, v2);
+    } else {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_schedule: unknown sub-command '%s'", sub);
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    return CMD_RES_OK;
+}
+
+/* ── IMP-R: kws_tou — get/set time-of-use tariff tiers ──────────────────
+ * Usage: kws_tou                            → print all tiers
+ *        kws_tou add <SH> <EH> <Rs/kWh>    → add a tier (max KWS_RATE_TIER_MAX)
+ *        kws_tou clear                      → remove all tiers (revert to flat)
+ * Example: kws_tou add 22 6 5.00    (off-peak 22:00-06:00 @ Rs5/unit)
+ *          kws_tou add  9 17 9.50   (peak    09:00-17:00 @ Rs9.50/unit)
+ * Hour ranges wrap midnight: if start_h > end_h the window crosses midnight.
+ * If no tier matches current hour, falls back to base kws_rate.           */
+static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
+                               const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_tou: base=Rs%.4f/kWh tiers=%u (max %u)",
+                  g_rate_rs, (unsigned)g_rate_tiers_n, (unsigned)KWS_RATE_TIER_MAX);
+        for (uint8_t i = 0u; i < g_rate_tiers_n; i++) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "  tier%u: %02u:00-%02u:00 @ Rs%.4f/kWh",
+                      (unsigned)i,
+                      (unsigned)g_rate_tiers[i].start_h,
+                      (unsigned)g_rate_tiers[i].end_h,
+                      g_rate_tiers[i].rate_rs);
+        }
+        /* Show currently active rate if NTP is synced. */
+#ifdef ENABLE_NTP
+        if (NTP_IsSynced()) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "  active now (hour=%02d): Rs%.4f/kWh",
+                      NTP_GetHour(), current_rate());
+        }
+#endif
+        return CMD_RES_OK;
+    }
+
+    char sub[8] = {0};
+    unsigned int sh = 0u, eh = 0u;
+    float rate = 0.0f;
+    sscanf(args, "%7s", sub);
+
+    if (strcmp(sub,"clear")==0) {
+        g_rate_tiers_n = 0u;
+        tou_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_tou: all tiers cleared — flat rate Rs%.4f active",
+                  g_rate_rs);
+    } else if (strcmp(sub,"add")==0) {
+        if (g_rate_tiers_n >= KWS_RATE_TIER_MAX) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "kws_tou: max %u tiers reached — clear first",
+                      (unsigned)KWS_RATE_TIER_MAX);
+            return CMD_RES_BAD_ARGUMENT;
+        }
+        /* Parse: "add SH EH RATE" — skip the sub-command word */
+        const char *rest = args + 4u;  /* skip "add " */
+        while (*rest == ' ') rest++;
+        if (sscanf(rest, "%u %u %f", &sh, &eh, &rate) != 3
+            || sh > 23u || eh > 23u || !(rate > 0.0f)) {
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "kws_tou add usage: kws_tou add <start_h> <end_h> <Rs/kWh>");
+            return CMD_RES_BAD_ARGUMENT;
+        }
+        uint8_t idx = g_rate_tiers_n;
+        g_rate_tiers[idx].start_h = (uint8_t)sh;
+        g_rate_tiers[idx].end_h   = (uint8_t)eh;
+        g_rate_tiers[idx].rate_rs = rate;
+        g_rate_tiers_n++;
+        tou_save();
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_tou: tier%u added %02u:00-%02u:00 @ Rs%.4f/kWh (saved)",
+                  (unsigned)idx, sh, eh, rate);
+    } else {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_tou: unknown sub-command '%s'", sub);
+        return CMD_RES_BAD_ARGUMENT;
+    }
+    return CMD_RES_OK;
+}
+
 void KWS303WF_Init(void)
 {
     addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "KWS303WF: init v%s %s",
@@ -1735,13 +2378,19 @@ void KWS303WF_Init(void)
     daily_load();
     g_daily_mqtt_sent    = 0u;   /* never sent this boot */
 
+    /* IMP-P: restore per-vehicle efficiency factors. */
+    vehicles_load();
+
+    /* IMP-Q: restore off-peak scheduling config. */
+    schedule_load();
+
+    /* IMP-R: restore TOU tariff tiers (reads extra lines from kws_rate.cfg). */
+    tou_load();
+
     /* IMP-L: heartbeat counter starts at 0 — first publish fires after
      * KWS_HEARTBEAT_S seconds; no publish on cold boot to avoid flood. */
     g_hb_tick = 0u;
 
-    /* IMP-N: display assumed ON at boot (ST7735_Init handles backlight). */
-    g_last_btn_s = 0u;
-    g_display_on = 1u;
 
     /* NTC init — seed on first ntc_tick() call */
     g_ntc_seeded    = 0u;
@@ -1798,8 +2447,12 @@ void KWS303WF_Init(void)
     /* IMP-M: fault log inspection */
     CMD_RegisterCommand("kws_faults_dump",      CMD_FaultsDump,   NULL);
     CMD_RegisterCommand("kws_faults_clear",     CMD_FaultsClear,  NULL);
-    /* IMP-N: display dim timeout */
-    CMD_RegisterCommand("kws_dim",              CMD_Dim,          NULL);
+    /* IMP-P: per-vehicle runtime efficiency factors */
+    CMD_RegisterCommand("kws_veh_config",       CMD_VehConfig,    NULL);
+    /* IMP-Q: off-peak scheduling */
+    CMD_RegisterCommand("kws_schedule",         CMD_Schedule,     NULL);
+    /* IMP-R: time-of-use tariff tiers */
+    CMD_RegisterCommand("kws_tou",              CMD_Tou,          NULL);
 
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
               "KWS303WF: ready fw=%s %s relay=P%d/P%d ntc=ADC%d slow=%us fast=%us rate=Rs%.2f/kWh",
@@ -1811,9 +2464,9 @@ void KWS303WF_Init(void)
               (float)NTC_WARN_C,(float)NTC_ALARM_C,
               (float)NTC_DEADBAND_C,(float)NTC_FAST_TRIGGER_C,(unsigned)NTC_EMA_N);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "  2W:%s %.1fkm/kWh  4W:%s %.1fkm/kWh  petrol=Rs%.0f/L",
-              KWS_VEH2_NAME,KWS_VEH2_KM_PER_KWH,
-              KWS_VEH4_NAME,KWS_VEH4_KM_PER_KWH,KWS_PETROL_RS_PER_L);
+              "  2W:%s %.1fkm/kWh(%.1fkmpl)  4W:%s %.1fkm/kWh(%.1fkmpl)  petrol=Rs%.0f/L",
+              KWS_VEH2_NAME, g_veh2_km_pkwh, g_veh2_old_kmpl,
+              KWS_VEH4_NAME, g_veh4_km_pkwh, g_veh4_old_kmpl, KWS_PETROL_RS_PER_L);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
               "  IMP-G rate_persist=yes  IMP-H protect=OV%.0fV/UV%.0fV/OC%.0fA",
               g_ov_thr, g_uv_thr, g_oc_thr);
@@ -1821,17 +2474,31 @@ void KWS303WF_Init(void)
               "  IMP-I co2_factor=%.0fg/kWh  IMP-J daily=%.3fkWh  IMP-K reboots=%u",
               (float)KWS_CO2_GRID_G_PER_KWH, g_daily_kwh, (unsigned)g_reboot_count);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "  IMP-L heartbeat=%us  IMP-M fault_log_cap=%u  IMP-N dim=%us",
-              (unsigned)KWS_HEARTBEAT_S, (unsigned)KWS_FAULT_MAX_ROWS,
-              (unsigned)g_dim_timeout);
+              "  IMP-L heartbeat=%us  IMP-M fault_log_cap=%u",
+              (unsigned)KWS_HEARTBEAT_S, (unsigned)KWS_FAULT_MAX_ROWS);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "  IMP-O NTP_ts=%s  IMP-P 2W=%.1fkm/kWh 4W=%.1fkm/kWh",
+#ifdef ENABLE_NTP
+              NTP_IsSynced() ? "synced" : "not_synced",
+#else
+              "no_ntp",
+#endif
+              g_veh2_km_pkwh, g_veh4_km_pkwh);
+    addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
+              "  IMP-Q sched=%s window=%02u:00-%02u:00  IMP-R tou_tiers=%u base=Rs%.2f",
+              g_sched_enabled ? "ON" : "off",
+              (unsigned)g_sched_start, (unsigned)g_sched_end,
+              (unsigned)g_rate_tiers_n, g_rate_rs);
 }
 
 /*
- * KWS303WF_RunEverySecond() — v1.1.0
+ * KWS303WF_RunEverySecond() — v1.2.0
  * IMP-J: daily_tick() — detects 24 h boundary, publishes daily MQTT summary, resets accumulator.
  * IMP-L: heartbeat_tick() — publishes compact status MQTT every KWS_HEARTBEAT_S seconds.
  * IMP-M: ht7017_alarm_tick() — logs HT7017 electrical alarms (OV/UV/OC/OP) to kws_faults.log.
- * IMP-N: dim_tick() — turns backlight off after KWS_DISPLAY_DIM_S idle seconds.
+ * IMP-O: NTP timestamp is evaluated per-session in sess_mqtt() — no RunEverySecond work needed.
+ * IMP-Q: sched_window_active() is evaluated at relay_close() call time — no tick needed.
+ * IMP-R: current_rate() is evaluated at sess_start() — no tick needed.
  */
 
 /* ── IMP-J: daily kWh tick ────────────────────────────────────────────────
@@ -1921,35 +2588,6 @@ static void ht7017_alarm_tick(void)
     s_prev_alarm = cur;
 }
 
-/* ── IMP-N: display dim tick ─────────────────────────────────────────────
- * Checks if the display should be turned off due to button inactivity.
- * Backlight control is through the ST7735 CMD interface — we reuse the
- * existing st7735_brightness command which is registered by drv_st7735.c.
- * This avoids a cross-driver API dependency: no new header needed.       */
-static void dim_tick(void)
-{
-    if (g_dim_timeout == 0u) return;   /* feature disabled */
-
-    uint32_t idle_s = (g_uptime_s > g_last_btn_s) ? (g_uptime_s - g_last_btn_s) : 0u;
-
-    if (g_display_on && idle_s >= g_dim_timeout) {
-        /* Turn off backlight via console command. */
-        CMD_ExecuteCommand("st7735_brightness 0", 0);
-        g_display_on = 0u;
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "KWS303WF: display dimmed after %u s idle", (unsigned)idle_s);
-    }
-}
-
-/* Called by button handlers to wake the display on any press. */
-static void dim_wake(void)
-{
-    g_last_btn_s = g_uptime_s;
-    if (!g_display_on) {
-        CMD_ExecuteCommand("st7735_brightness 1", 0);
-        g_display_on = 1u;
-    }
-}
 
 void KWS303WF_RunEverySecond(void)
 {
@@ -1998,8 +2636,6 @@ void KWS303WF_RunEverySecond(void)
     /* IMP-M: log HT7017 electrical alarm transitions to kws_faults.log. */
     ht7017_alarm_tick();
 
-    /* IMP-N: turn backlight off after idle timeout. */
-    dim_tick();
 }
 
 /* ============================================================================
