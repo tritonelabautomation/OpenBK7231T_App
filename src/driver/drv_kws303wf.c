@@ -1362,7 +1362,7 @@ static void sess_start(uint8_t veh)
               (veh==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME);
 }
 
-static char             g_mqtt_pending_pl[320] = {0};
+static char             g_mqtt_pending_pl[340] = {0};  /* BUG-22: enlarged 320->340 (IMP-U pf+freq adds 28 bytes, worst-case=326) */
 static volatile uint8_t g_mqtt_pending          = 0;
 static uint8_t          g_mqtt_attempts         = 0;   /* WARN-1 FIX: cap retries */
 #define KWS_MQTT_MAX_ATTEMPTS  3   /* abandon after 3 WiFi-up attempts */
@@ -1373,7 +1373,7 @@ static uint8_t          g_mqtt_attempts         = 0;   /* WARN-1 FIX: cap retrie
  * IMP-K: added reboot_count for uptime diagnostics in HA.
  * Worst-case payload recalculated:
  *   Before: 236 chars.  After: +22 chars (co2_saved_g + reboot_count) = 258 chars.
- *   258 < g_mqtt_pending_pl[320] OK
+ *   258 < g_mqtt_pending_pl[340] OK
  */
 /*
  * sess_mqtt() - v1.2.0
@@ -1382,7 +1382,7 @@ static uint8_t          g_mqtt_attempts         = 0;   /* WARN-1 FIX: cap retrie
  *         compile-time KWS_VEH2/4_KM_PER_KWH / KWS_VEH2/4_OLD_KMPL.
  * Worst-case payload size after additions:
  *   IMP-O adds ts field: "\"ts\":\"2026-03-13T22:05:47\","  = +26 chars
- *   Previous max 258 + 26 = 284 chars < g_mqtt_pending_pl[320] OK
+ *   Previous max 258 + 26 = 284 chars < g_mqtt_pending_pl[340] OK
  */
 static void sess_mqtt(void)
 {
