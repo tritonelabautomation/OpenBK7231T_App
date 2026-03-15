@@ -99,12 +99,29 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdbool.h>
-/* IMP-O: OBK NTP driver - provides NTP_IsSynced(), NTP_GetHour/Min/Sec/Day/Month/Year().
- * Guarded by ENABLE_NTP which is set for PLATFORM_BEKEN in obk_config.h.
- * If NTP is not synced, sess_mqtt() falls back to "uptime_s" field only.   */
-#ifdef ENABLE_NTP
-#include "drv_ntp.h"
-#endif
+/* IMP-O: OBK time API.
+ * TIME_GetCurrentTime() is declared in obktime (built as part of OBK core).
+ * Returns a Unix timestamp (seconds since epoch); returns 0 when not synced.
+ * We use standard C localtime() to break it into year/month/day/hour/min/sec.
+ * No separate header needed - TIME_GetCurrentTime is declared via new_common.h
+ * which is already included above.                                           */
+#include <time.h>
+/* Forward-declare TIME_GetCurrentTime in case it isn't pulled in yet. */
+extern int TIME_GetCurrentTime(void);
+
+/* kws_ntp_synced() - returns 1 if OBK time is synced (timestamp > 0).       */
+static int kws_ntp_synced(void) { return TIME_GetCurrentTime() > 0; }
+
+/* kws_localtime() - fills a struct tm from the current Unix timestamp.
+ * Returns 1 on success, 0 if not synced or localtime() returns NULL.        */
+static int kws_localtime(struct tm *out) {
+    time_t t = (time_t)TIME_GetCurrentTime();
+    if (t <= 0) return 0;
+    struct tm *p = localtime(&t);
+    if (!p) return 0;
+    *out = *p;
+    return 1;
+}
 
 #ifndef LOG_FEATURE_ENERGY
 #define LOG_FEATURE_ENERGY LOG_FEATURE_MAIN
@@ -667,16 +684,21 @@ static uint8_t sched_window_active(void)
 {
     if (!g_sched_enabled) return 1u;   /* scheduling off - always allow     */
 #ifdef ENABLE_NTP
-    if (!NTP_IsSynced()) return 1u;    /* no time yet - fail open           */
-    int h = NTP_GetHour();
-    uint8_t sh = g_sched_start;
-    uint8_t eh = g_sched_end;
-    if (sh <= eh) {
-        /* Same-day window e.g. 08:00-12:00 */
-        return (h >= sh && h < eh) ? 1u : 0u;
-    } else {
-        /* Midnight-crossing window e.g. 22:00-06:00 */
-        return (h >= sh || h < eh) ? 1u : 0u;
+    {
+        struct tm _tm;
+        uint8_t sh, eh;
+        int h;
+        if (!kws_localtime(&_tm)) return 1u;   /* no time yet - fail open */
+        h  = _tm.tm_hour;
+        sh = g_sched_start;
+        eh = g_sched_end;
+        if (sh <= eh) {
+            /* Same-day window e.g. 08:00-12:00 */
+            return (h >= (int)sh && h < (int)eh) ? 1u : 0u;
+        } else {
+            /* Midnight-crossing window e.g. 22:00-06:00 */
+            return (h >= (int)sh || h < (int)eh) ? 1u : 0u;
+        }
     }
 #else
     return 1u;   /* no NTP compiled in - always allow */
@@ -764,8 +786,11 @@ static float current_rate(void)
 {
     if (g_rate_tiers_n == 0u) return g_rate_rs;
 #ifdef ENABLE_NTP
-    if (!NTP_IsSynced()) return g_rate_rs;
-    return rate_for_hour(NTP_GetHour());
+    {
+        struct tm _tm;
+        if (!kws_localtime(&_tm)) return g_rate_rs;
+        return rate_for_hour(_tm.tm_hour);
+    }
 #else
     return g_rate_rs;
 #endif
@@ -916,7 +941,7 @@ static void relay_close(void)
                       "use kws_schedule disable to bypass",
                       (unsigned)g_sched_start, (unsigned)g_sched_end,
 #ifdef ENABLE_NTP
-                      NTP_IsSynced() ? (unsigned)NTP_GetHour() : 99u
+                      99u  /* hour omitted - use kws_schedule to check */
 #else
                       99u
 #endif
@@ -1364,16 +1389,16 @@ static void sess_mqtt(void)
     /* IMP-O: NTP ISO-8601 timestamp - "YYYY-MM-DDTHH:MM:SS" or null. */
     char ts_buf[26];   /* "2026-03-13T22:05:47" = 19 chars + quotes + null */
 #ifdef ENABLE_NTP
-    if (NTP_IsSynced()) {
-        snprintf(ts_buf, sizeof(ts_buf), "\"%04d-%02d-%02dT%02d:%02d:%02d\"",
-                 NTP_GetYear(), NTP_GetMonth(),  NTP_GetDay(),
-                 NTP_GetHour(), NTP_GetMinute(), NTP_GetSecond());
-    } else {
-        snprintf(ts_buf, sizeof(ts_buf), "null");
+    {
+        struct tm _tm;
+        if (kws_localtime(&_tm)) {
+            snprintf(ts_buf, sizeof(ts_buf), "\"%04d-%02d-%02dT%02d:%02d:%02d\"",
+                     _tm.tm_year + 1900, _tm.tm_mon + 1, _tm.tm_mday,
+                     _tm.tm_hour, _tm.tm_min, _tm.tm_sec);
+        } else {
+            snprintf(ts_buf, sizeof(ts_buf), "null");
+        }
     }
-#else
-    snprintf(ts_buf, sizeof(ts_buf), "null");
-#endif
 
     snprintf(g_mqtt_pending_pl, sizeof(g_mqtt_pending_pl),
              "{\"vehicle\":\"%s\",\"kwh\":%.3f,\"cost_rs\":%.2f,"
@@ -2016,16 +2041,19 @@ static commandResult_t CMD_Schedule(const void *ctx, const char *cmd,
 {
     if (!args || !*args) {
 #ifdef ENABLE_NTP
-        int synced = NTP_IsSynced();
-        int h = synced ? NTP_GetHour() : -1;
-        uint8_t active = sched_window_active();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_schedule: enabled=%u window=%02u:00-%02u:00 "
-                  "ntp=%s current_h=%d in_window=%u",
-                  (unsigned)g_sched_enabled,
-                  (unsigned)g_sched_start, (unsigned)g_sched_end,
-                  synced ? "synced" : "NOT_SYNCED", h,
-                  (unsigned)active);
+        {
+            struct tm _tm;
+            int synced = kws_localtime(&_tm);
+            int h = synced ? _tm.tm_hour : -1;
+            uint8_t active = sched_window_active();
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "kws_schedule: enabled=%u window=%02u:00-%02u:00 "
+                      "ntp=%s current_h=%d in_window=%u",
+                      (unsigned)g_sched_enabled,
+                      (unsigned)g_sched_start, (unsigned)g_sched_end,
+                      synced ? "synced" : "NOT_SYNCED", h,
+                      (unsigned)active);
+        }
 #else
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                   "kws_schedule: enabled=%u window=%02u:00-%02u:00 (no NTP)",
@@ -2099,10 +2127,13 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
                           g_rate_tiers[i].rate_rs);
             }
 #ifdef ENABLE_NTP
-            if (NTP_IsSynced()) {
-                addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                          "  current hour=%02d -> active rate=Rs%.4f/kWh",
-                          NTP_GetHour(), current_rate());
+            {
+                struct tm _tm;
+                if (kws_localtime(&_tm)) {
+                    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                              "  current hour=%02d -> active rate=Rs%.4f/kWh",
+                              _tm.tm_hour, current_rate());
+                }
             }
 #endif
         }
@@ -2286,7 +2317,7 @@ void KWS303WF_Init(void)
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
               "  IMP-O NTP_ts=%s  IMP-P 2W=%.1fkm/kWh 4W=%.1fkm/kWh",
 #ifdef ENABLE_NTP
-              NTP_IsSynced() ? "synced" : "not_synced",
+              kws_ntp_synced() ? "synced" : "not_synced",
 #else
               "no_ntp",
 #endif
