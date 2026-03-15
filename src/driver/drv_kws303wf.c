@@ -378,11 +378,10 @@ static float    g_oc_thr    = KWS_OC_DEFAULT;  /* over-current trip (A)    */
 /* ── IMP-J: daily kWh accumulator ────────────────────────────────────────
  * g_daily_kwh   accumulates kWh from session ends during the current day.
  * g_daily_start_uptime  uptime_s at the start of the current day period.
- * g_daily_last_midnight uptime_s at the last midnight reset (for detection).
  * g_daily_mqtt_sent     1 = daily summary already sent this midnight event.*/
 static float    g_daily_kwh           = 0.0f;
 static uint32_t g_daily_start_uptime  = 0u;
-static uint32_t g_daily_last_midnight = 0u;
+/* g_daily_last_midnight removed — IMP-S uses NTP wall-clock midnight directly */
 static uint8_t  g_daily_mqtt_sent     = 0u;
 
 /* ── IMP-K: reboot counter ────────────────────────────────────────────── */
@@ -555,7 +554,9 @@ static void daily_load(void)
     if (!f) return;
     float kwh = 0.0f;
     uint32_t start = 0u;
-    int n = fscanf(f, "kwh=%f\nstart=%u\n", &kwh, &start);
+    unsigned int start_ui = 0u;
+    int n = fscanf(f, "kwh=%f\nstart=%u\n", &kwh, &start_ui);
+    start = (uint32_t)start_ui;
     fclose(f);
     if (n != 2 || !(kwh >= 0.0f)) {
         addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
@@ -771,6 +772,7 @@ static float current_rate(void)
 }
 
 
+/* IMP-M: fault_log() — append one fault event to kws_faults.log.
  * Capped at KWS_FAULT_MAX_ROWS to prevent unbounded flash growth.
  * alarm_code: 1=OV, 2=UV, 3=OC, 4=OP (power), 5=THM (NTC)
  * uptime_s: caller provides g_uptime_s for the timestamp.               */
@@ -1586,7 +1588,7 @@ static void sess_tick(void)
  * SECTION G — BUTTON CALLBACKS
  * ============================================================================ */
 /* FIX-UX3: on_toggle now implicitly starts/ends session via relay_close/open
- * arming the detect window and relay_open calling sess_end().
+ * arming the detect window and relay_open calling sess_end().            */
 static void on_toggle(void)   { if (g_relay_closed) relay_open(); else relay_close(); }
 static void on_session(void)
 {
@@ -2149,204 +2151,8 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
  * IMP-H: protect_load() restores OV/UV/OC thresholds.
  * IMP-J: daily_load() restores today's accumulated kWh.
  * IMP-K: increments g_reboot_count and persists immediately after lifetime_load().
-    /* IMP-L: g_hb_tick initialised to 0 — first heartbeat fires after KWS_HEARTBEAT_S s. */
+ * IMP-L: g_hb_tick initialised to 0 — first heartbeat fires after KWS_HEARTBEAT_S s.
  * IMP-P: vehicles_load() restores per-vehicle efficiency factors.
- * IMP-Q: schedule_load() restores off-peak window config.
- * IMP-R: tou_load() restores TOU tariff tiers from kws_rate.cfg.
- */
-
-/* ── IMP-P: kws_veh_config — get/set runtime vehicle efficiency factors ──
- * Usage: kws_veh_config                       → print current values
- *        kws_veh_config 2w <km/kWh> [km/L]   → set 2-wheeler factors
- *        kws_veh_config 4w <km/kWh> [km/L]   → set 4-wheeler factors
- * km/L (old petrol efficiency) is optional; omit to keep current value.   */
-static commandResult_t CMD_VehConfig(const void *ctx, const char *cmd,
-                                     const char *args, int flags)
-{
-    if (!args || !*args) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_veh_config:"
-                  "  2W: %.2f km/kWh  %.2f km/L(petrol)"
-                  "  4W: %.2f km/kWh  %.2f km/L(petrol)",
-                  g_veh2_km_pkwh, g_veh2_old_kmpl,
-                  g_veh4_km_pkwh, g_veh4_old_kmpl);
-        return CMD_RES_OK;
-    }
-    char  type[4] = {0};
-    float km_pkwh = 0.0f, km_pl = 0.0f;
-    int n = sscanf(args, "%3s %f %f", type, &km_pkwh, &km_pl);
-    if (n < 2 || !(km_pkwh > 0.0f)) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_veh_config usage: kws_veh_config 2w|4w <km/kWh> [km/L]");
-        return CMD_RES_BAD_ARGUMENT;
-    }
-    /* km/L is optional — only update if provided (n==3) and positive. */
-    int is2w = (strcmp(type,"2w")==0 || strcmp(type,"2W")==0);
-    int is4w = (strcmp(type,"4w")==0 || strcmp(type,"4W")==0);
-    if (!is2w && !is4w) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_veh_config: type must be 2w or 4w");
-        return CMD_RES_BAD_ARGUMENT;
-    }
-    if (is2w) {
-        g_veh2_km_pkwh = km_pkwh;
-        if (n == 3 && km_pl > 0.0f) g_veh2_old_kmpl = km_pl;
-    } else {
-        g_veh4_km_pkwh = km_pkwh;
-        if (n == 3 && km_pl > 0.0f) g_veh4_old_kmpl = km_pl;
-    }
-    vehicles_save();
-    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-              "kws_veh_config: %s set %.2f km/kWh %.2f km/L (saved)",
-              is2w ? "2W" : "4W",
-              is2w ? g_veh2_km_pkwh : g_veh4_km_pkwh,
-              is2w ? g_veh2_old_kmpl : g_veh4_old_kmpl);
-    return CMD_RES_OK;
-}
-
-/* ── IMP-Q: kws_schedule — get/set/enable/disable off-peak schedule ──────
- * Usage: kws_schedule                     → print current config
- *        kws_schedule enable              → activate scheduling
- *        kws_schedule disable             → deactivate (relay always allowed)
- *        kws_schedule start <hour>        → set window open hour (0-23)
- *        kws_schedule end   <hour>        → set window close hour (0-23)
- *        kws_schedule window <SH> <EH>   → set both hours at once
- * All changes are persisted to kws_schedule.cfg immediately.              */
-static commandResult_t CMD_Schedule(const void *ctx, const char *cmd,
-                                    const char *args, int flags)
-{
-    if (!args || !*args) {
-        /* Print state + NTP-aware window status */
-        char ntp_status[24] = "NTP unknown";
-#ifdef ENABLE_NTP
-        if (NTP_IsSynced())
-            snprintf(ntp_status, sizeof(ntp_status), "now=%02d:00", NTP_GetHour());
-        else
-            snprintf(ntp_status, sizeof(ntp_status), "NTP not synced");
-#endif
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_schedule: enabled=%u window=%02u:00-%02u:00 "
-                  "active=%u %s",
-                  (unsigned)g_sched_enabled,
-                  (unsigned)g_sched_start, (unsigned)g_sched_end,
-                  (unsigned)sched_window_active(), ntp_status);
-        return CMD_RES_OK;
-    }
-
-    char sub[16] = {0};
-    unsigned int v1 = 0u, v2 = 0u;
-    sscanf(args, "%15s %u %u", sub, &v1, &v2);
-
-    if (strcmp(sub,"enable")==0) {
-        g_sched_enabled = 1u; g_sched_blocked = 0u; schedule_save();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_schedule: enabled (window %02u:00-%02u:00)",
-                  (unsigned)g_sched_start, (unsigned)g_sched_end);
-    } else if (strcmp(sub,"disable")==0) {
-        g_sched_enabled = 0u; g_sched_blocked = 0u; schedule_save();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY, "kws_schedule: disabled");
-    } else if (strcmp(sub,"start")==0) {
-        if (v1 > 23u) return CMD_RES_BAD_ARGUMENT;
-        g_sched_start = (uint8_t)v1; schedule_save();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_schedule: window start set to %02u:00", v1);
-    } else if (strcmp(sub,"end")==0) {
-        if (v1 > 23u) return CMD_RES_BAD_ARGUMENT;
-        g_sched_end = (uint8_t)v1; schedule_save();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_schedule: window end set to %02u:00", v1);
-    } else if (strcmp(sub,"window")==0) {
-        if (v1 > 23u || v2 > 23u) return CMD_RES_BAD_ARGUMENT;
-        g_sched_start = (uint8_t)v1;
-        g_sched_end   = (uint8_t)v2;
-        schedule_save();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_schedule: window set %02u:00-%02u:00", v1, v2);
-    } else {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_schedule: unknown sub-command '%s'", sub);
-        return CMD_RES_BAD_ARGUMENT;
-    }
-    return CMD_RES_OK;
-}
-
-/* ── IMP-R: kws_tou — get/set time-of-use tariff tiers ──────────────────
- * Usage: kws_tou                            → print all tiers
- *        kws_tou add <SH> <EH> <Rs/kWh>    → add a tier (max KWS_RATE_TIER_MAX)
- *        kws_tou clear                      → remove all tiers (revert to flat)
- * Example: kws_tou add 22 6 5.00    (off-peak 22:00-06:00 @ Rs5/unit)
- *          kws_tou add  9 17 9.50   (peak    09:00-17:00 @ Rs9.50/unit)
- * Hour ranges wrap midnight: if start_h > end_h the window crosses midnight.
- * If no tier matches current hour, falls back to base kws_rate.           */
-static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
-                               const char *args, int flags)
-{
-    if (!args || !*args) {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_tou: base=Rs%.4f/kWh tiers=%u (max %u)",
-                  g_rate_rs, (unsigned)g_rate_tiers_n, (unsigned)KWS_RATE_TIER_MAX);
-        for (uint8_t i = 0u; i < g_rate_tiers_n; i++) {
-            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                      "  tier%u: %02u:00-%02u:00 @ Rs%.4f/kWh",
-                      (unsigned)i,
-                      (unsigned)g_rate_tiers[i].start_h,
-                      (unsigned)g_rate_tiers[i].end_h,
-                      g_rate_tiers[i].rate_rs);
-        }
-        /* Show currently active rate if NTP is synced. */
-#ifdef ENABLE_NTP
-        if (NTP_IsSynced()) {
-            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                      "  active now (hour=%02d): Rs%.4f/kWh",
-                      NTP_GetHour(), current_rate());
-        }
-#endif
-        return CMD_RES_OK;
-    }
-
-    char sub[8] = {0};
-    unsigned int sh = 0u, eh = 0u;
-    float rate = 0.0f;
-    sscanf(args, "%7s", sub);
-
-    if (strcmp(sub,"clear")==0) {
-        g_rate_tiers_n = 0u;
-        tou_save();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_tou: all tiers cleared — flat rate Rs%.4f active",
-                  g_rate_rs);
-    } else if (strcmp(sub,"add")==0) {
-        if (g_rate_tiers_n >= KWS_RATE_TIER_MAX) {
-            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                      "kws_tou: max %u tiers reached — clear first",
-                      (unsigned)KWS_RATE_TIER_MAX);
-            return CMD_RES_BAD_ARGUMENT;
-        }
-        /* Parse: "add SH EH RATE" — skip the sub-command word */
-        const char *rest = args + 4u;  /* skip "add " */
-        while (*rest == ' ') rest++;
-        if (sscanf(rest, "%u %u %f", &sh, &eh, &rate) != 3
-            || sh > 23u || eh > 23u || !(rate > 0.0f)) {
-            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                      "kws_tou add usage: kws_tou add <start_h> <end_h> <Rs/kWh>");
-            return CMD_RES_BAD_ARGUMENT;
-        }
-        uint8_t idx = g_rate_tiers_n;
-        g_rate_tiers[idx].start_h = (uint8_t)sh;
-        g_rate_tiers[idx].end_h   = (uint8_t)eh;
-        g_rate_tiers[idx].rate_rs = rate;
-        g_rate_tiers_n++;
-        tou_save();
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_tou: tier%u added %02u:00-%02u:00 @ Rs%.4f/kWh (saved)",
-                  (unsigned)idx, sh, eh, rate);
-    } else {
-        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
-                  "kws_tou: unknown sub-command '%s'", sub);
-        return CMD_RES_BAD_ARGUMENT;
-    }
-    return CMD_RES_OK;
-}
 
 void KWS303WF_Init(void)
 {
