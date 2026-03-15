@@ -236,6 +236,10 @@ static FILE *robust_fopen_w(const char *path)
 #define KWS_CH_WIFI          11   /* OBK core - read-only here for MQTT guard */
 #define KWS_CH_SESS_ACTIVE   12   /* 0=idle 1=active - read by display        */
 #define KWS_CH_SESS_ELAPSED  13   /* seconds since sess_start - display timer  */
+/* IMP-T/U: voltage, frequency, power-factor channels (same as drv_ht7017) */
+#define KWS_CH_VOLTAGE        1   /* V   x100   (div100 = volts)              */
+#define KWS_CH_FREQ           4   /* Hz  x100   (div100 = Hz)                 */
+#define KWS_CH_PF             5   /* PF  x1000  (div1000 = 0.000-1.000)       */
 /* IMP-A: NTC thermal alarm channel - 0=normal, 1=alarm latched (relay opened).
  * Read by drv_st7735 to colour the temperature field red and show "THM" in the
  * alarm zone when an over-temperature trip has occurred.
@@ -438,6 +442,12 @@ typedef struct {
 } RateTier_t;
 static RateTier_t g_rate_tiers[KWS_RATE_TIER_MAX];
 static uint8_t    g_rate_tiers_n = 0u;  /* active tier count; 0 = TOU disabled */
+
+/* IMP-V: session lock state ----------------------------------------------- */
+#define KWS_LOCK_HOLD_TICKS  300u   /* 300 x 10ms ticks = 3 s hold gesture   */
+static uint8_t  g_sess_locked   = 0u;  /* 0=unlocked, 1=locked               */
+static uint16_t g_lock_hold_tk  = 0u;  /* SESSION pin hold counter            */
+static uint8_t  g_lock_prev_pin = 1u;  /* previous SESSION pin level          */
 
 /*
  * lifetime_load() - v1.1.0
@@ -949,6 +959,12 @@ static void relay_close(void)
         }
         return;
     }
+    /* IMP-V: session lock gate - if locked, veto relay close. */
+    if (g_sess_locked) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "KWS303WF: relay close BLOCKED - locked (hold SESSION 3s to unlock)");
+        return;
+    }
     g_sched_blocked = 0u;  /* reset dedup on a successful close */
     relay_pulse_start(KWS_RELAY_PIN_ON);
     g_relay_closed = 1;
@@ -1403,10 +1419,17 @@ static void sess_mqtt(void)
     snprintf(ts_buf, sizeof(ts_buf), "null");
 #endif /* ENABLE_NTP */
 
+    /* IMP-U: capture PF and frequency at session end for power-quality record.
+     * Both are instantaneous readings from the last second of the session.
+     * Payload grows from max 284 to max ~312 bytes; still < 320 buffer. */
+    float sess_pf  = (float)ReadCh(KWS_CH_PF)   / 1000.0f;
+    float sess_hz  = (float)ReadCh(KWS_CH_FREQ)  / 100.0f;
+
     snprintf(g_mqtt_pending_pl, sizeof(g_mqtt_pending_pl),
              "{\"vehicle\":\"%s\",\"kwh\":%.3f,\"cost_rs\":%.2f,"
              "\"km\":%.1f,\"saved_rs\":%.2f,\"segments\":%u,"
              "\"peak_w\":%.1f,\"peak_a\":%.3f,"
+             "\"pf\":%.3f,\"freq_hz\":%.2f,"
              "\"duration_s\":%u,\"uptime_s\":%u,"
              "\"ntc_alarm\":%u,\"lifetime_kwh\":%.3f,"
              "\"co2_saved_g\":%u,\"reboot_count\":%u,"
@@ -1414,6 +1437,7 @@ static void sess_mqtt(void)
              (g_ev.vehicle==KWS_VEH_2W) ? KWS_VEH2_NAME : KWS_VEH4_NAME,
              kwh, cost, km, saved, g_ev.seg_count,
              g_ev.peak_w, g_ev.peak_a,
+             sess_pf, sess_hz,
              (unsigned)g_ev.duration_s, (unsigned)g_uptime_s,
              (unsigned)g_ntc_alarm,
              lifetime_now / 1000.0f,
@@ -2120,7 +2144,7 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
         } else {
             addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                       "kws_tou: %u tier(s), base=Rs%.4f/kWh",
-                      (unsigned)g_rate_tiers_n, g_rate_rs);
+                      (unsigned)g_rate_tiers_n, g_sess_locked ? "ON" : "off");
             for (uint8_t i = 0u; i < g_rate_tiers_n; i++) {
                 addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
                           "  tier%u: %02u:00-%02u:00  Rs%.4f/kWh",
@@ -2188,6 +2212,27 @@ static commandResult_t CMD_Tou(const void *ctx, const char *cmd,
  * IMP-L: g_hb_tick initialised to 0 - first heartbeat fires after KWS_HEARTBEAT_S s.
  * IMP-P: vehicles_load() restores per-vehicle efficiency factors.
  */
+
+/* IMP-V: kws_lock - get/set session relay lock state.
+ * Usage: kws_lock          -> print current lock state
+ *        kws_lock 1        -> lock relay (blocks relay_close)
+ *        kws_lock 0        -> unlock relay
+ * The 3-second SESSION button hold also toggles this at runtime. */
+static commandResult_t CMD_Lock(const void *ctx, const char *cmd,
+                                const char *args, int flags)
+{
+    if (!args || !*args) {
+        addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                  "kws_lock: %s (hold SESSION 3s to toggle)",
+                  g_sess_locked ? "LOCKED" : "unlocked");
+        return CMD_RES_OK;
+    }
+    g_sess_locked = (atoi(args) != 0) ? 1u : 0u;
+    addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+              "KWS303WF: relay %s via console",
+              g_sess_locked ? "LOCKED" : "unlocked");
+    return CMD_RES_OK;
+}
 
 void KWS303WF_Init(void)
 {
@@ -2281,6 +2326,8 @@ void KWS303WF_Init(void)
     CMD_RegisterCommand("kws_ha_devname",       CMD_HaDevname,    NULL);
     /* IMP-H: protection threshold persistence */
     CMD_RegisterCommand("kws_protect",          CMD_Protect,      NULL);
+    /* IMP-V: session relay lock */
+    CMD_RegisterCommand("kws_lock",             CMD_Lock,         NULL);
     /* IMP-J: daily reset (also triggerable via autoexec CALENDAR_EVENT) */
     CMD_RegisterCommand("kws_daily_reset",      CMD_DailyReset,   NULL);
     /* IMP-L: heartbeat control */
@@ -2326,7 +2373,7 @@ void KWS303WF_Init(void)
 #endif
               g_veh2_km_pkwh, g_veh4_km_pkwh);
     addLogAdv(LOG_INFO,LOG_FEATURE_ENERGY,
-              "  IMP-Q sched=%s window=%02u:00-%02u:00  IMP-R tou_tiers=%u base=Rs%.2f",
+              "  IMP-Q sched=%s window=%02u:00-%02u:00  IMP-R tou_tiers=%u  IMP-V lock=%s",
               g_sched_enabled ? "ON" : "off",
               (unsigned)g_sched_start, (unsigned)g_sched_end,
               (unsigned)g_rate_tiers_n, g_rate_rs);
@@ -2349,12 +2396,40 @@ void KWS303WF_Init(void)
  * midnight but it is robust across reboots and does not require NTP.
  * If NTP is available the user can call kws_daily_reset via autoexec at
  * midnight using OBK's CALENDAR_EVENT feature (not done here - stays simple).*/
+/*
+ * daily_tick() - IMP-S: replaced uptime-based 86400s boundary with
+ * NTP wall-clock midnight (hour==0, minute==0) when TIME is synced.
+ * Falls back to original 86400s uptime period when not synced, so
+ * the daily summary still fires even without a network time source.
+ * g_daily_mqtt_sent is cleared whenever we leave the midnight minute,
+ * preventing repeated publishes within the same 60-second window.
+ */
 static void daily_tick(void)
 {
-    /* Check if 24 h have elapsed since the last day-start. */
-    if ((g_uptime_s - g_daily_start_uptime) < 86400u) return;
+    uint8_t do_reset = 0u;
 
-    /* Midnight boundary crossed - publish daily summary, then reset. */
+#ifdef ENABLE_NTP
+    if (kws_ntp_synced()) {
+        struct tm _tm;
+        if (kws_localtime(&_tm)) {
+            if (_tm.tm_hour == 0 && _tm.tm_min == 0 && !g_daily_mqtt_sent) {
+                do_reset = 1u;
+            } else if (_tm.tm_hour != 0 || _tm.tm_min != 0) {
+                g_daily_mqtt_sent = 0u;  /* clear for next midnight */
+            }
+        } else {
+            /* TIME_GetCurrentTime > 0 but localtime failed - fall through */
+            if ((g_uptime_s - g_daily_start_uptime) >= 86400u) do_reset = 1u;
+        }
+    } else {
+        if ((g_uptime_s - g_daily_start_uptime) >= 86400u) do_reset = 1u;
+    }
+#else
+    if ((g_uptime_s - g_daily_start_uptime) >= 86400u) do_reset = 1u;
+#endif
+
+    if (!do_reset) return;
+
     float kwh = g_daily_kwh;
 
     if (!g_daily_mqtt_sent && ReadCh(KWS_CH_WIFI) != 0) {
@@ -2370,10 +2445,8 @@ static void daily_tick(void)
         g_daily_mqtt_sent = 1u;
     }
 
-    /* Reset for the new day. */
     g_daily_kwh          = 0.0f;
     g_daily_start_uptime = g_uptime_s;
-    g_daily_mqtt_sent    = 0u;
     daily_save();
 }
 
@@ -2389,17 +2462,29 @@ static void heartbeat_tick(void)
 
     if (ReadCh(KWS_CH_WIFI) == 0) return;   /* defer - no WiFi */
 
-    char pl[160];
+    /* IMP-T: include live electrical readings so HA energy entities stay
+     * fresh between sessions. Scaling: V/100, A/1000, W/10, Hz/100. */
+    float hb_v  = (float)ReadCh(KWS_CH_VOLTAGE) / 100.0f;
+    float hb_a  = (float)ReadCh(KWS_CH_CURRENT) / 1000.0f;
+    float hb_w  = (float)ReadCh(KWS_CH_POWER)   / 10.0f;
+    float hb_hz = (float)ReadCh(KWS_CH_FREQ)     / 100.0f;
+    float hb_pf = (float)ReadCh(KWS_CH_PF)       / 1000.0f;
+
+    char pl[220];
     snprintf(pl, sizeof(pl),
              "{\"relay\":%u,\"temp_c\":%.1f,\"session\":%u,"
-             "\"lifetime_kwh\":%.3f,\"uptime_s\":%u,\"fw\":\"%s\"}",
+             "\"lifetime_kwh\":%.3f,\"uptime_s\":%u,"
+             "\"voltage_v\":%.1f,\"current_a\":%.3f,"
+             "\"power_w\":%.1f,\"freq_hz\":%.2f,\"pf\":%.3f,"
+             "\"fw\":\"%s\"}",
              (unsigned)g_relay_closed,
              g_ntc_ema,
              (unsigned)g_ev.active,
              g_lifetime_wh / 1000.0f,
              (unsigned)g_uptime_s,
+             hb_v, hb_a, hb_w, hb_hz, hb_pf,
              KWS_FW_VERSION_STR);
-    char cmd[220];
+    char cmd[260];
     snprintf(cmd, sizeof(cmd), "publishMQTT %s %s", KWS_HEARTBEAT_TOPIC, pl);
     CMD_ExecuteCommand(cmd, 0);
 }
@@ -2418,7 +2503,7 @@ static void ht7017_alarm_tick(void)
         /* Rising edge or change in alarm code - log it. */
         float val = 0.0f;
         switch (cur) {
-            case 1: val = (float)ReadCh(KWS_CH_RELAY); /* use voltage Ch1 */ val = (float)ReadCh(1) / 100.0f; break;
+            case 1: val = (float)ReadCh(KWS_CH_VOLTAGE) / 100.0f; break;  /* BUG-21 fix: was dead double-assign */
             case 2: val = (float)ReadCh(1) / 100.0f; break;
             case 3: val = (float)ReadCh(KWS_CH_CURRENT) / 1000.0f; break;
             case 4: val = (float)ReadCh(KWS_CH_POWER) / 10.0f; break;
@@ -2495,10 +2580,44 @@ void KWS303WF_RunEverySecond(void)
  * is now released within the first quick-tick AFTER the second boundary
  * (~0-10 ms overshoot) instead of 0-1 s.
  * ============================================================================ */
+/*
+ * lock_tick() - IMP-V: 3-second SESSION hold toggles relay lock.
+ * Called every ~10ms from RunQuickTick(). When SESSION pin is held
+ * LOW (pressed) for KWS_LOCK_HOLD_TICKS consecutive ticks, the lock
+ * state flips. Releasing before the threshold resets the counter.
+ * Visual feedback: the status MQTT topic publishes the new lock state.
+ * Note: btn_tick() still fires the normal SESSION callback on a short
+ * press; hold detection is additive, not a replacement.
+ */
+static void lock_tick(void)
+{
+    uint8_t pin = (uint8_t)HAL_PIN_ReadDigitalInput(KWS_BTN_SESSION);
+
+    if (pin == 0u) {
+        /* Pin LOW = button pressed */
+        if (g_lock_hold_tk < KWS_LOCK_HOLD_TICKS) {
+            g_lock_hold_tk++;
+        }
+        if (g_lock_hold_tk == KWS_LOCK_HOLD_TICKS && g_lock_prev_pin == 0u) {
+            /* Threshold just reached on this tick - toggle lock */
+            g_sess_locked = g_sess_locked ? 0u : 1u;
+            g_lock_hold_tk++;  /* increment past threshold to prevent re-fire */
+            addLogAdv(LOG_INFO, LOG_FEATURE_ENERGY,
+                      "KWS303WF: relay %s by 3s hold",
+                      g_sess_locked ? "LOCKED" : "unlocked");
+        }
+    } else {
+        /* Pin HIGH = button released - reset counter */
+        g_lock_hold_tk = 0u;
+    }
+    g_lock_prev_pin = pin;
+}
+
 void KWS303WF_RunQuickTick(void)
 {
     relay_pulse_tick();
     btn_tick();
+    lock_tick();   /* IMP-V: 3-second SESSION hold -> lock/unlock relay */
 }
 
 /* ============================================================================
